@@ -1,14 +1,15 @@
-# Code from https://github.com/researchmm/AOT-GAN-for-Inpainting.git
-# cGAN adapted-ish
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.nn.utils import spectral_norm
-
 from models.aotgan.common import BaseNetwork
+from torch.nn.utils import spectral_norm
+import torch.distributions as dist
+import torch.nn.functional as F
+from models.vae import Basic
+import torch.nn as nn
+import torch
 
-#size = 200
+
+# Author: @GuillermoTafoya & @simonamador
+# The following code builds an autoencoder model for unsupervised learning applications in MRI anomaly detection.
+
 
 def calculate_ga_index(ga, size, min_GA = 20, max_GA = 40):
         # Map GA to the nearest increment starting from 20 (assuming a range of 20-40 GA)
@@ -39,55 +40,117 @@ BOE_forms = {
         }
 
 def create_bi_partitioned_ordinal_vector(gas, size, BOE_form='BOE'):
-        # Adjusting the threshold for the nearest 0.1 increment
         threshold_index = size//2
         device = gas.device
         batch_size = gas.size(0)
-        # ga_indices = calculate_ga_index_exp(gas, size)
         ga_indices= BOE_forms[BOE_form](gas, size)
-        vectors = torch.full((batch_size, size), -1, device=device)  # Default fill with -1
-
+        vectors = torch.full((batch_size, size), -1, device=device)
         for i in range(batch_size):
             idx = ga_indices[i].long()
             if idx > size:
                 idx = size
             elif idx < 0:
                 idx = 1
-            
-
-            if idx >= threshold_index:  # GA >= 30
+            if idx >= threshold_index:
                 new_idx = (idx-threshold_index)*2
-                vectors[i, :new_idx] = 1  # First 100 elements to 1 (up to GA == 30)
-                vectors[i, new_idx:] = 0  # The rest to 0
-            else:  # GA < 30
+                vectors[i, :new_idx] = 1
+                vectors[i, new_idx:] = 0
+            else:
                 new_idx = idx*2
-                vectors[i, :new_idx] = 0  # First 100 elements to 0
-                # The rest are already set to -1
-
+                vectors[i, :new_idx] = 0
         return vectors
 
 
-class InpaintGenerator(BaseNetwork):
-    def __init__(self, rates='1+2+4+8', block_num=8, BOE_size=0, BOE_form = 'BOE'):  # 1046
+# Encoder class builds encoder model depending on the model type.
+# Inputs: H, y (x and y size of the MRI slice),z_dim (length of the output z-parameters), model (the model type)
+class Encoder(nn.Module):
+    def __init__(
+            self, 
+            h,
+            w,
+            z_dim,
+            method,
+            model: str = 'default',
+            ga_n = 100,
+            BOE_form = 'BOE'
+        ):
+
+        method_type = ['bpoe']
+
+        if method not in method_type:
+            raise ValueError('Invalid method to include. Expected: %s' % method_type)
+
+        ch = 16
+        k_size = 4
+        stride = 2
+        self.method = method
+        self.model = model
+        self.size = ga_n
+
+        super(Encoder,self).__init__()
+
+        self.step0 = Basic(1,ch,k_size=k_size, stride=stride)
+
+        self.step1 = Basic(ch,ch * 2, k_size=k_size, stride=stride)
+        self.step2 = Basic(ch * 2,ch * 4, k_size=k_size, stride=stride)
+        self.step3 = Basic(ch * 4,ch * 8, k_size=k_size, stride=stride)
+
+        n_h = int(((h-k_size)/(stride**4)) - (k_size-1)/(stride**3) - (k_size-1)/(stride**2) - (k_size-1)/stride + 1)
+        n_w = int(((w-k_size)/(stride**4)) - (k_size-1)/(stride**3) - (k_size-1)/(stride**2) - (k_size-1)/stride + 1)
+        self.flat_n = n_h * n_w * ch * 8
+        self.linear = nn.Linear(self.flat_n,z_dim)
+
+        self.BOE_form = BOE_forms[BOE_form]
+
+    def forward(self,x,ga):
+        
+        if self.size and self.method == 'bpoe':
+            ga = create_bi_partitioned_ordinal_vector(ga)
+        
+        embeddings = []
+
+        x = self.step0(x)
+        embeddings.append(x)
+        x = self.step1(x)
+        embeddings.append(x)
+        x = self.step2(x)
+        embeddings.append(x)
+        x = self.step3(x)
+        embeddings.append(x)
+
+        x = x.view(-1, self.flat_n)
+
+        z_params = self.linear(x)
+        
+        mu, log_std = torch.chunk(z_params, 2, dim=1)
+
+        std = torch.exp(log_std)
+        z_dist = dist.Normal(mu, std)
+
+        z_sample = z_dist.rsample()
+
+        if self.size and self.method in ['bpoe']:
+            z_sample = torch.cat((z_sample,ga), 1)
+
+        if self.model == 'bVAE':
+            return z_sample, mu, log_std
+        
+        return z_sample, mu, log_std, {'embeddings': embeddings}
+
+# Code from https://github.com/researchmm/AOT-GAN-for-Inpainting.git
+
+class Decoder(BaseNetwork):
+    def __init__(self, rates='1+2+4+8', block_num=8, BOE_size=0, BOE_form = 'BOE'):
         nr_channels = 1
         rates=[1, 2, 4, 8]
-        super(InpaintGenerator, self).__init__()
+        super(Decoder, self).__init__()
 
         self.BOE_size = BOE_size
 
-        self.encoder = nn.Sequential(
-            nn.ReflectionPad2d(3),
-            nn.Conv2d(2, 64, 7),
-            nn.ReLU(True),
-            nn.Conv2d(64, 128, 4, stride=2, padding=1),
-            nn.ReLU(True),
-            nn.Conv2d(128, 256, 4, stride=2, padding=1),
-            nn.ReLU(True)
-        )
-
-        self.middle = nn.Sequential(*[AOTBlock(256+self.BOE_size, rates) for _ in range(block_num)])
+        self.aot = nn.Sequential(*[AOTBlock(256+self.BOE_size, rates) for _ in range(block_num)])
 
         self.decoder = nn.Sequential(
+            # nn.Linear(z_dim, self.z_develop)
             UpConv(256+self.BOE_size, 128),
             nn.ReLU(True),
             UpConv(128, 64),
@@ -99,19 +162,8 @@ class InpaintGenerator(BaseNetwork):
 
         self.BOE_form = BOE_form
 
-    def forward(self, x, mask, ga=None):
-        x = torch.cat([x, mask], dim=1)  # Combine image and mask
-        x = self.encoder(x)
-
-        if self.BOE_size and ga is not None:
-            # Encode GA
-            encoded_ga = create_bi_partitioned_ordinal_vector(ga, self.BOE_size, self.BOE_form)
-            # You may need to expand the dimensions to match x
-            encoded_ga_expanded = encoded_ga.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, x.size(2), x.size(3))
-            # Concatenate encoded GA with the feature map
-            x = torch.cat([x, encoded_ga_expanded], dim=1)
-
-        x = self.middle(x)
+    def forward(self, x):
+        x = self.aot(x)
         x = self.decoder(x)
         x = torch.tanh(x)
         return x
@@ -164,6 +216,8 @@ def my_layer_norm(feat):
     feat = 5 * feat
     return feat
 
+
+""" TODO
 # ----- discriminator -----
 class Discriminator(BaseNetwork):
     def __init__(self,  BOE_size=0, BOE_form = 'BOE'):
@@ -208,3 +262,43 @@ class Discriminator(BaseNetwork):
         # Process through convolutional layers
         img_features = self.conv(x)
         return img_features
+    
+
+
+# Decoder class builds decoder model depending on the model type.
+# Inputs: H, y (x and y size of the MRI slice),z_dim (length of the input z-vector), model (the model type) 
+# Note: z_dim in Encoder is not the same as z_dim in Decoder, as the z_vector has half the size of the z_parameters.
+class Decoder(nn.Module):
+    def __init__(
+            self, 
+            h, 
+            w, 
+            z_dim, 
+            ):
+        super(Decoder, self).__init__()
+
+        self.ch = 16
+        self.k_size = 4
+        self.stride = 2
+        self.hshape = int(((h-self.k_size)/(self.stride**4)) - (self.k_size-1)/(self.stride**3) - (self.k_size-1)/(self.stride**2) - (self.k_size-1)/self.stride + 1)
+        self.wshape = int(((w-self.k_size)/(self.stride**4)) - (self.k_size-1)/(self.stride**3) - (self.k_size-1)/(self.stride**2) - (self.k_size-1)/self.stride + 1)
+
+        self.z_develop = self.hshape * self.wshape * 8 * self.ch
+        self.linear = nn.Linear(z_dim, self.z_develop)
+        self.step1 = Basic(self.ch* 8, self.ch * 4, k_size=self.k_size, stride=self.stride, transpose=True)
+        self.step2 = Basic(self.ch * 4, self.ch * 2, k_size=self.k_size, stride=self.stride, transpose=True)
+        self.step3 = Basic(self.ch * 2, self.ch, k_size=self.k_size, stride=self.stride, transpose=True)        
+        self.step4 = Basic(self.ch, 1, k_size=self.k_size, stride=self.stride, transpose=True)
+        self.activation = nn.ReLU()
+
+    def forward(self,z):
+        x = self.linear(z)
+        x = x.view(-1, self.ch * 8, self.hshape, self.wshape)
+        x = self.step1(x)
+        x = self.step2(x)
+        x = self.step3(x)
+        x = self.step4(x)
+        recon = self.activation(x)
+        return recon
+    
+"""

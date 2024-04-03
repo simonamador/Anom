@@ -7,8 +7,8 @@ import torch.optim as optim
 
 import matplotlib.pyplot as plt
 
-from models.framework import Framework
-from utils.config import loader, load_model
+from models.framework_new import Framework
+from utils.config import loader, load_model_new
 from utils import loss as loss_lib
 from utils.debugging_printers import *
 from utils.BOE import *
@@ -53,7 +53,7 @@ class Trainer:
 
         # Load pre-trained parameters
         if parameters['pretrained'] == 'base':
-            encoder, decoder = load_model(parameters['pretrained_path'], parameters['VAE_model_type'], 
+            encoder, decoder = load_model_new(parameters['pretrained_path'], parameters['VAE_model_type'], 
                                           parameters['ga_method'], parameters['slice_size'], 
                                           parameters['slice_size'], parameters['z_dim'], 
                                           model=parameters['type'], pre = parameters['pretrained'], 
@@ -61,7 +61,7 @@ class Trainer:
             self.model.encoder = encoder
             self.model.decoder = decoder
         if parameters['pretrained'] == 'refine':
-            refineG, refineD = load_model(parameters['pretrained_path'], parameters['VAE_model_type'], 
+            refineG, refineD = load_model_new(parameters['pretrained_path'], parameters['VAE_model_type'], 
                                           parameters['ga_method'], parameters['slice_size'],
                                           parameters['slice_size'], parameters['z_dim'], 
                                           model=parameters['type'], pre = parameters['pretrained'],
@@ -69,7 +69,7 @@ class Trainer:
             self.model.refineG = refineG
             self.model.refineD = refineD
         prGreen('Model successfully instanciated...')
-        self.pre = None # parameters['pretrained']
+        self.pre = parameters['pretrained']
 
         
         self.z_dim = parameters['z_dim']
@@ -114,15 +114,14 @@ class Trainer:
         self.losses = {'L1':loss_lib.l1_loss,
                 'Style':loss_lib.Style(),
                 'Perceptual':loss_lib.Perceptual()}
-        self.adv_loss = loss_lib.smgan()
+        self.adv_loss = loss_lib.smgan_nomask()
         self.adv_weight = 0.01
 
         self.embedding_loss = loss_lib.EmbeddingLoss()
-        # super(PTrainer, self).__init__(training_params, model, data, device, log_wandb)
         print(f'{parameters["slice_size"]=}')
         prGreen('Optimizers successfully loaded...')
 
-        self.BOE_form = parameters['BOE_type']
+        self.BOE_type = parameters['BOE_type']
 
     def train(self, epochs, b_loss):
         
@@ -170,12 +169,10 @@ class Trainer:
                 ga = data['ga'].to(self.device) if self.ga else None
                 
                 count_images += self.batch 
-                encoded_ga = create_bi_partitioned_ordinal_vector(ga, self.ga_n, self.BOE_form) if self.ga_n else None
+                encoded_ga = create_bi_partitioned_ordinal_vector(ga, self.ga_n) if self.ga_n else None
                 noise_batch = torch.randn(size=(self.batch, self.z_dim//2)).to(self.device) 
                 noise_batch = torch.cat((noise_batch,encoded_ga), 1)
                 real_batch = images.to(self.device)
-                # print(f'{real_batch.shape=}')
-                # print(f'{noise_batch.shape=}')
 
                 
 
@@ -226,7 +223,7 @@ class Trainer:
                     lossE_real = self.scale * (self.beta_rec * loss_rec + self.beta_kl * lossE_real_kl) # ELBO
 
                     # lossE = lossE_real + lossE_fake + 0.005 * loss_emb     lambda = 0.005
-                    lossE = lossE_real + lossE_fake + 0.01 * loss_emb
+                    lossE = lossE_real + lossE_fake + 0.01 * loss_emb # lambda = 0.01
                     self.optimizer_e.zero_grad()
                     lossE.backward()
                     self.optimizer_e.step()
@@ -285,7 +282,7 @@ class Trainer:
                     batch_emb += loss_emb.cpu().item() * images.shape[0]
                     
                 else:
-                    z, real_mu, real_logvar, anomaly_embeddings = self.model.encode(real_batch)
+                    z, real_mu, real_logvar, anomaly_embeddings = self.model.encode(real_batch, ga)
                     rec = self.model.decoder(z)
                     diff_kls = -1
                     batch_kls_real = -1
@@ -309,31 +306,18 @@ class Trainer:
                     for param in self.model.refineD.parameters():
                         param.requires_grad = True
 
-                    # Obtain anomaly metric, use it to generate the masks
-                    saliency, anomalies = self.model.anomap.anomaly(rec.detach(), real_batch)
-                    anomalies = anomalies * saliency
-                    masks = self.model.anomap.mask_generation(anomalies)
-
-                    x_ref = (real_batch * (1 - masks).float()) + masks
-
-                    # Refined reconstruction through AOT-GAN
-                    y_ref = self.model.refineG(x_ref, masks, ga) 
-                    
+                    y_ref = self.model.refineG(rec, ga)
                     y_ref = torch.clamp(y_ref, 0, 1)
-
                     zero_pad = torch.nn.ZeroPad2d(1)
                     y_ref = zero_pad(y_ref)
+                    ref_recon = y_ref
 
-                    # Only include the parts from the refined reconstruction which the mask
-                    # identified as anomalous
-                    ref_recon = (1-masks)*real_batch + masks*y_ref
-
-                    # Losses for AOT-GAN
+                    # Losses for GAN
                     losses = {}
                     for name, weight in self.loss_keys.items():
                         losses[name] = weight * self.losses[name](y_ref, real_batch)
 
-                    dis_loss, gen_loss = self.adv_loss(self.model.refineD, ref_recon, real_batch, masks, ga)
+                    dis_loss, gen_loss = self.adv_loss(self.model.refineD, ref_recon, real_batch, ga)
 
                     losses['advg'] = gen_loss * self.adv_weight
                     
@@ -422,7 +406,7 @@ class Trainer:
                 ref_recon, res_dic = self.model(real_batch, ga)
 
                 # Obtain the anomaly metric from the model
-                anomap = abs(ref_recon-real_batch)*self.model.anomap.saliency_map(ref_recon,real_batch)
+                # anomap = abs(ref_recon-real_batch)*self.model.anomap.saliency_map(ref_recon,real_batch)
 
                 # Calc the losses
 
@@ -434,7 +418,7 @@ class Trainer:
                 for name, weight in self.loss_keys.items():
                     losses[name] = weight * self.losses[name](res_dic["y_ref"], real_batch)
 
-                dis_loss, gen_loss = self.adv_loss(self.model.refineD, ref_recon, real_batch, res_dic["mask"], ga)
+                dis_loss, gen_loss = self.adv_loss(self.model.refineD, ref_recon, real_batch, ga)
 
                 losses['advg'] = gen_loss * self.adv_weight
 
@@ -446,7 +430,7 @@ class Trainer:
                 mse_loss += loss_lib.l2_loss(res_dic["y_ref"], real_batch).item()
                 mae_loss += loss_lib.l1_loss(res_dic["y_ref"], real_batch).item()
                 ssim     += 1 - loss_lib.ssim_loss(res_dic["y_ref"], real_batch).item()
-                anom     += torch.mean(anomap.flatten()).item()
+                # anom     += torch.mean(anomap.flatten()).item()
 
             base_loss /= len(self.loader["ts"])
             refineG_loss /= len(self.loader["ts"])
@@ -455,11 +439,10 @@ class Trainer:
             mse_loss /= len(self.loader["ts"])
             mae_loss /= len(self.loader["ts"])
             ssim /= len(self.loader["ts"])
-            anom /= len(self.loader["ts"])    
+            # anom /= len(self.loader["ts"])    
 
             # Images dic for visualization
-            images = {"input": real_batch[0][0], "recon": res_dic["x_recon"][0], "saliency": res_dic["saliency"][0],
-                      "mask": -res_dic["mask"][0], "ref_recon": ref_recon[0], "anomaly": anomap[0][0]}    
+            images = {"input": real_batch[0][0], "recon": res_dic["x_recon"][0], "ref_recon": ref_recon[0] }    
         
         return {'losses': [ed_loss, refineG_loss, refineD_loss],'metrics': [mse_loss, mae_loss, ssim, anom], 'images': images}
 
@@ -490,7 +473,7 @@ class Trainer:
             }, f'{self.model_path}/{component}_latest.pth')
 
         # Save and plot model components every 50 epochs or in the first or last epoch
-        if (epoch == 0) or ((epoch + 1) % 50 == 0) or ((epoch + 1) == epochs):
+        if (epoch == 0) or ((epoch + 1) % 10 == 0) or ((epoch + 1) == epochs):
             for component in components:
                 torch.save({'epoch': epoch + 1, component: getattr(self.model, component).state_dict()},
                         f'{self.model_path}/{component}_{epoch + 1}.pth')
@@ -522,15 +505,11 @@ class Trainer:
 
 
     def plot(self, images):
-        fig, axs = plt.subplots(2, 3, figsize=(10, 6))
-        names = [["input", "recon", "ref_recon"], ["saliency", "anomaly", "mask"]]
-        cmap_i = ["gray", "hot"]
-        for x in range(2):
-            for y in range(3):
-                if x == 1 and y == 2:
-                    cmap_i[1] = "binary"
-                axs[x, y].imshow(images[names[x][y]].detach().cpu().numpy().squeeze(), cmap=cmap_i[x])
-                axs[x, y].set_title(names[x][y])
-                axs[x, y].axis("off")
+        fig, axs = plt.subplots(1, 3, figsize=(10, 6))
+        names = ["input", "recon", "ref_recon"]
+        for y in range(3):
+            axs[y].imshow(images[names[y]].detach().cpu().numpy().squeeze(), cmap='gray')
+            axs[y].set_title(names[y])
+            axs[y].axis("off")
         plt.tight_layout()
         return fig

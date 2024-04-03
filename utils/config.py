@@ -279,12 +279,12 @@ def val_loader(val_path, images, view, data='healthy', raw=False):
 
     return loader
 
-def load_model(model_path, base, ga_method, w, h, z_dim, model='default', pre = False, ga_n = 100):
+def load_model(model_path, base, ga_method, w, h, z_dim, model='default', pre = False, ga_n = 100, BOE_form = 'BOE'):
     prCyan(f'{ga_method=}')
     if base == 'ga_VAE':
         # from models.ga_vae import Encoder, Decoder
         from models.SI_VAE import Encoder, Decoder
-        encoder = Encoder(h, w, z_dim, method = ga_method, model = model, ga_n = ga_n)
+        encoder = Encoder(h, w, z_dim, method = ga_method, model = model, ga_n = ga_n, BOE_form = BOE_form)
     else:
         from models.vae import Encoder, Decoder
         encoder = Encoder(h, w, z_dim, model=model)
@@ -299,8 +299,189 @@ def load_model(model_path, base, ga_method, w, h, z_dim, model='default', pre = 
     cpd_new = OrderedDict()
 
     import models.aotgan.aotgan as inpainting
-    refineG = inpainting.InpaintGenerator(BOE_size=200)#BOE_size=0)
-    refineD = inpainting.Discriminator(BOE_size=200)#BOE_size=0)
+    refineG = inpainting.InpaintGenerator(BOE_size=0, BOE_form = BOE_form)#BOE_size=0)
+    refineD = inpainting.Discriminator(BOE_size=0, BOE_form = BOE_form)#BOE_size=0)
+    cp_refG = torch.load(model_path+'refineG_best.pth', map_location=torch.device('cpu'))
+    cp_refD = torch.load(model_path+'refineD_best.pth', map_location=torch.device('cpu'))
+    # cp_refG = torch.load(model_path+'refineG_latest.pth', map_location=torch.device('cpu'))
+    # cp_refD = torch.load(model_path+'refineD_latest.pth', map_location=torch.device('cpu'))
+
+    cp_refG_new = OrderedDict()
+    cp_refD_new = OrderedDict()
+
+    if pre == 'base':
+        for k, v in cpe['encoder'].items():
+            name = k[:]
+            cpe_new[name] = v
+
+        for k, v in cpd['decoder'].items():
+            name = k[:]
+            cpd_new[name] = v
+
+        encoder.load_state_dict(cpe_new)
+        decoder.load_state_dict(cpd_new)
+        return encoder, decoder
+    else:
+        for k, v in cp_refG['refineG'].items():
+            name = k
+            cp_refG_new[name] = v
+
+        refineG.load_state_dict(cp_refG_new)
+
+        if pre == 'full':
+            for k, v in cpe['encoder'].items():
+                name = k
+                if (k=='linear.weight' or k=='linear.bias') and ga_method not in ['ordinal_encoding', 'one_hot_encoding', 'bpoe']:
+                    cpe_new[name] = v[:511]
+                else:
+                    cpe_new[name] = v
+
+            for k, v in cpd['decoder'].items():
+                name = k
+                cpd_new[name] = v
+
+            encoder.load_state_dict(cpe_new)
+            decoder.load_state_dict(cpd_new)
+
+            return encoder, decoder, refineG
+        elif pre == 'refine':
+            for k, v in cp_refD['refineD'].items():
+                name = k
+                cp_refD_new[name] = v
+
+            refineD.load_state_dict(cp_refD_new)
+            return refineG, refineD
+        else:
+            raise NameError('Pre-trained model did not load properly')
+        
+def load_model_new(model_path, base, ga_method, w, h, z_dim, model='default', pre = False, ga_n = 100, BOE_form = 'BOE'):
+    prCyan(f'{ga_method=}')
+    if base == 'ga_VAE':
+        # from models.ga_vae import Encoder, Decoder
+        from models.SI_VAE import Encoder, Decoder
+        encoder = Encoder(h, w, z_dim, method = ga_method, model = model, ga_n = ga_n, BOE_form = BOE_form)
+    else:
+        from models.vae import Encoder, Decoder
+        encoder = Encoder(h, w, z_dim, model=model)
+    decoder = Decoder(h, w, int(z_dim/2) + (ga_n if ga_method in ['ordinal_encoding', 'one_hot_encoding', 'bpoe'] else 0))
+
+    cpe = torch.load(model_path+'encoder_best.pth', map_location=torch.device('cpu'))
+    cpd = torch.load(model_path+'decoder_best.pth', map_location=torch.device('cpu'))
+    # cpe = torch.load(model_path+'encoder_latest.pth', map_location=torch.device('cpu'))
+    # cpd = torch.load(model_path+'decoder_latest.pth', map_location=torch.device('cpu'))
+
+    cpe_new = OrderedDict()
+    cpd_new = OrderedDict()
+
+    import models.aotgan.aotgan_new as inpainting
+    refineG = inpainting.InpaintGenerator(BOE_size=200, BOE_form = BOE_form)#BOE_size=0)
+    refineD = inpainting.Discriminator(BOE_size=200, BOE_form = BOE_form)#BOE_size=0)
+    # cp_refG = torch.load(model_path+'refineG_best.pth', map_location=torch.device('cpu'))
+    # cp_refD = torch.load(model_path+'refineD_best.pth', map_location=torch.device('cpu'))
+    cp_refG = torch.load(model_path+'refineG_latest.pth', map_location=torch.device('cpu'))
+    cp_refD = torch.load(model_path+'refineD_latest.pth', map_location=torch.device('cpu'))
+
+    cp_refG_new = OrderedDict()
+    cp_refD_new = OrderedDict()
+
+    if pre == 'base':
+        for k, v in cpe['encoder'].items():
+            name = k[:]
+            cpe_new[name] = v
+
+        for k, v in cpd['decoder'].items():
+            name = k[:]
+            cpd_new[name] = v
+
+        encoder.load_state_dict(cpe_new)
+        decoder.load_state_dict(cpd_new)
+        return encoder, decoder
+    else:
+        for k, v in cp_refG['refineG'].items():
+            name = k
+            cp_refG_new[name] = v
+
+        refineG.load_state_dict(cp_refG_new)
+
+        if pre == 'full':
+            for k, v in cpe['encoder'].items():
+                name = k
+                if (k=='linear.weight' or k=='linear.bias') and ga_method not in ['ordinal_encoding', 'one_hot_encoding', 'bpoe']:
+                    cpe_new[name] = v[:511]
+                else:
+                    cpe_new[name] = v
+
+            for k, v in cpd['decoder'].items():
+                name = k
+                cpd_new[name] = v
+
+            encoder.load_state_dict(cpe_new)
+            decoder.load_state_dict(cpd_new)
+
+            return encoder, decoder, refineG
+        elif pre == 'refine':
+            for k, v in cp_refD['refineD'].items():
+                name = k
+                cp_refD_new[name] = v
+
+            refineD.load_state_dict(cp_refD_new)
+            return refineG, refineD
+        else:
+            raise NameError('Pre-trained model did not load properly')
+        
+def load_model_new_new(model_path, base, ga_method, w, h, z_dim, model='default', pre = False, ga_n = 100, BOE_form = 'BOE'):
+    prCyan(f'{ga_method=}')
+    
+    from models.VAE_GAN import Encoder, Decoder
+    encoder = Encoder(h, w, z_dim, method = ga_method, model = model, ga_n = ga_n, BOE_form = BOE_form)
+    
+    decoder = Decoder(h, w, int(z_dim/2) + (ga_n if ga_method in ['ordinal_encoding', 'one_hot_encoding', 'bpoe'] else 0))
+
+    cpe = torch.load(model_path+'encoder_best.pth', map_location=torch.device('cpu'))
+    cpd = torch.load(model_path+'decoder_best.pth', map_location=torch.device('cpu'))
+    # cpe = torch.load(model_path+'encoder_latest.pth', map_location=torch.device('cpu'))
+    # cpd = torch.load(model_path+'decoder_latest.pth', map_location=torch.device('cpu'))
+
+    cpe_new = OrderedDict()
+    cpd_new = OrderedDict()
+
+    try:
+        for k, v in cpe['encoder'].items():
+            name = k[:]
+            cpe_new[name] = v
+
+        for k, v in cpd['decoder'].items():
+            name = k[:]
+            cpd_new[name] = v
+
+        encoder.load_state_dict(cpe_new)
+        decoder.load_state_dict(cpd_new)
+        return encoder, decoder
+    except:
+        raise NameError('Pre-trained model did not load properly')
+
+def load_model_cycle(model_path, base, ga_method, w, h, z_dim, model='default', pre = False, ga_n = 100, BOE_form = 'BOE'):
+    prCyan(f'{ga_method=}')
+    if base == 'ga_VAE':
+        # from models.ga_vae import Encoder, Decoder
+        from models.SI_VAE import Encoder, Decoder
+        encoder = Encoder(h, w, z_dim, method = ga_method, model = model, ga_n = ga_n, BOE_form = BOE_form)
+    else:
+        from models.vae import Encoder, Decoder
+        encoder = Encoder(h, w, z_dim, model=model)
+    decoder = Decoder(h, w, int(z_dim/2) + (ga_n if ga_method in ['ordinal_encoding', 'one_hot_encoding', 'bpoe'] else 0))
+
+    cpe = torch.load(model_path+'encoder_best.pth', map_location=torch.device('cpu'))
+    cpd = torch.load(model_path+'decoder_best.pth', map_location=torch.device('cpu'))
+    # cpe = torch.load(model_path+'encoder_latest.pth', map_location=torch.device('cpu'))
+    # cpd = torch.load(model_path+'decoder_latest.pth', map_location=torch.device('cpu'))
+
+    cpe_new = OrderedDict()
+    cpd_new = OrderedDict()
+
+    import models.aotgan.aotgan as inpainting
+    refineG = inpainting.InpaintGenerator(BOE_size=200, BOE_form = BOE_form)#BOE_size=0)
+    refineD = inpainting.Discriminator(BOE_size=200, BOE_form = BOE_form)#BOE_size=0)
     # cp_refG = torch.load(model_path+'refineG_best.pth', map_location=torch.device('cpu'))
     # cp_refD = torch.load(model_path+'refineD_best.pth', map_location=torch.device('cpu'))
     cp_refG = torch.load(model_path+'refineG_latest.pth', map_location=torch.device('cpu'))
@@ -384,7 +565,7 @@ def settings_parser():
     
     parser.add_argument('--task',
         dest='task',
-        choices=['Train', 'Validate', 'Visualize'],
+        choices=['Train', 'Validate', 'Visualize', 'Train_CycleGAN', 'Train_GAN'],
         required=False,
         default='Train',
         help='''
@@ -590,6 +771,14 @@ def settings_parser():
         required=False,
         help='''
         The value of the beta neg parameter.
+        ''')
+    parser.add_argument('--BOE_type',
+        dest='BOE_type',
+        default='BOE',
+        choices=['BOE', 'EBOE', 'inv_BOE', 'inv_inv_BOE'],
+        required=False,
+        help='''
+        BOE type.
         ''')
     
 

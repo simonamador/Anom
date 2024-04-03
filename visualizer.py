@@ -4,6 +4,10 @@ from utils.config import load_model, val_loader
 from utils.loss import ssim_loss, l1_loss, l2_loss
 from models.anomaly import Anomaly
 from models.framework import Framework
+from models.csgan.cycle_GAN import CycleGANModel
+
+from models.framework_new import Framework as GANFramework
+from utils.config import load_model_new as load_GAN_model
 
 import torch
 import matplotlib.pyplot as plt
@@ -14,9 +18,11 @@ import pandas as pd
 import os
 import numpy as np
 from utils.debugging_printers import *
+from bunch_py3 import *
+
 
 class Visualizer:
-    def __init__(self, parameters):
+    def __init__(self, parameters, task = 'base'):
                  
                  
                  #, path, model_path, base, model, view, method, z_dim, name, n, device, training_folder, ga_n, raw, th = 99, cGAN = False):
@@ -39,22 +45,85 @@ class Visualizer:
 
             self.th = parameters['th'] if parameters['th'] else 99
 
+            model_loader = {
+                'base':load_model,
+                'gan': load_GAN_model
+            }
+
+            frameworks = {
+                'base': Framework,
+                'gan': GANFramework
+            }
+
             # Generate and load model
             print(parameters['model_path'])
-            self.model = Framework(parameters['slice_size'], parameters['z_dim'], 
+            self.model = frameworks[task](parameters['slice_size'], parameters['z_dim'], 
                                    parameters['ga_method'], parameters['device'], 
                                    parameters['model_path'], self.ga, parameters['ga_n'], 
-                                   th = self.th)
+                                   th = self.th, BOE_form = parameters['BOE_type'])
             
             # self.model.encoder, self.model.decoder, self.model.refineG = load_model(model_path, base, method, 
             #                                                     n, n, z_dim, model=model, pre = 'full', ga_n=ga_n)
 
-            self.model.encoder, self.model.decoder, self.model.refineG = load_model(parameters['model_path'], parameters['VAE_model_type'], 
+            self.model.encoder, self.model.decoder, self.model.refineG = model_loader[task](parameters['model_path'], parameters['VAE_model_type'], 
                                                                                 parameters['ga_method'], parameters['slice_size'], 
                                                                                 parameters['slice_size'], parameters['z_dim'], 
                                                                                 model=parameters['type'], pre = 'full', 
-                                                                                ga_n = parameters['ga_n'])
-        
+                                                                                ga_n = parameters['ga_n'], BOE_form = parameters['BOE_type'])
+            
+
+            if task in ['cycle']:
+            
+
+                opt = Bunch({
+                'lambda_identity': 0.5,     # First, try using identity loss `--lambda_identity 1.0` or `--lambda_identity 0.1`. 
+                                                # We observe that the identity loss makes the generator to be more conservative and make fewer unnecessary changes. 
+                                                # However, because of this, the change may not be as dramatic.
+                                                # use identity mapping. Setting lambda_identity other than 0 has an effect of scaling the weight of the identity mapping loss. 
+                                                # For example, if the weight of the identity loss should be 10 times smaller than the weight of the reconstruction loss, 
+                                                # please set lambda_identity = 0.1
+                'input_nc': 1,              # # of input image channels: 3 for RGB and 1 for grayscale
+                'output_nc': 1,             # # of output image channels: 3 for RGB and 1 for grayscale
+                'ngf': 64,                  # # of gen filters in the last conv layer
+                'netG': 'resnet_9blocks',   # specify generator architecture [resnet_9blocks | resnet_6blocks | unet_256 | unet_128] 
+                'norm': 'instance',         # instance normalization or batch normalization [instance | batch | none]
+                'no_dropout': True,         # no dropout for the generator
+                'init_type': 'normal',      # network initialization [normal | xavier | kaiming | orthogonal]
+                'init_gain': 0.02,          # scaling factor for normal, xavier and orthogonal.
+                'gpu_ids': [0,1,2],         # Please set`--gpu_ids -1` to use CPU mode; set `--gpu_ids 0,1,2` for multi-GPU mode. You need a large batch size (e.g., `--batch_size 32`) to benefit from multiple GPUs.
+                'ndf': 64,                  # # of discrim filters in the first conv layer
+                'netD': 'basic',            # specify discriminator architecture [basic | n_layers | pixel]. 
+                                                # The basic model is a 70x70 PatchGAN. n_layers allows you to specify the layers in the discriminator
+                'n_layers_D': 3,            # only used if netD==n_layers
+                'pool_size': 50,            # the size of image buffer, if pool_size=0, no buffer will be created
+                'gan_mode': 'lsgan',        # the type of GAN objective. [vanilla| lsgan | wgangp]. 
+                                                # vanilla GAN loss is the cross-entropy objective used in the original GAN paper.
+                'direction': 'AtoB',        # AtoB or BtoA
+                'lr': 0.0002,               # initial learning rate for adam
+                'beta1': 0.5,               # momentum term of adam 
+                                                #     parser.add_argument('--lambda_identity', type=float, default=0.5, help='')
+                'lambda_A': 10.0,           # weight for cycle loss (A -> B -> A)
+                'lambda_B': 10.0,           # weight for cycle loss (B -> A -> B)
+                'isTrain': True,
+                'checkpoints_dir': 'Test',
+                'name': 'Test',
+                'continue_train': False,
+                'load_iter': 0,             # which iteration to load? if load_iter > 0, the code will load models by iter_[load_iter]; otherwise, the code will load models by [epoch]
+                'lr_policy': 'linear',      # learning rate policy. [linear | step | plateau | cosine]
+                'epoch_count': 1,           # the starting epoch count, we save the model by <epoch_count>, <epoch_count>+<save_latest_freq>, ...
+                'n_epochs': 200,            # number of epochs with the initial learning rate
+                'n_epochs_decay': 200,      # number of epochs to linearly decay learning rate to zero
+                'verbose': True,
+                'preprocess': 'crop', # scaling and cropping of images at load time [resize_and_crop | crop | scale_width | scale_width_and_crop | none]
+                'load_size': 160,
+                'crop_size': 160
+                    }
+                )
+
+                ### Cycle GAN ###
+                self.cycle_GAN = CycleGANModel(opt)
+                self.cycle_GAN.setup(opt) 
+            
             # Visualization paths
             self.hist_path = parameters['path']+'Results' + model_name + '/history.txt'
             self.vis_path = parameters['path']+'Results/Visualization/'+model_name+'/'
@@ -211,9 +280,10 @@ class Visualizer:
 
     def save_reconstruction_images(self, delta_ga=10, TD = True):
         model = self.model.to(self.device)
+        path = self.td_path if TD else self.vm_path
         images = self.td_images if TD else self.vm_images
 
-        loader = val_loader(self.td_path, self.td_images, self.view, raw = self.raw)
+        loader = val_loader(path, images, self.view, raw = self.raw, data='healthy' if TD else 'VM')
 
         prev = ''
         reconstructed = 0
@@ -226,7 +296,6 @@ class Visualizer:
                 continue
             prev = images[int(id / 30)][:-4]
             img = slice['image'].to(self.device)
-            original_img = np.rot90(img.detach().cpu().numpy().squeeze(), 1)  # Assuming img is a single-channel image
             ga = slice['ga'].to(self.device)
             original_ga = ga.clone().detach().cpu().numpy().item()  # Get original GA as a float
             ga_variation = np.arange(20, 41, 1)  # Original range of gestational ages
@@ -246,15 +315,74 @@ class Visualizer:
                 ax.set_title(f'GA: {ga_val:.2f}')
                 ax.axis('off')
 
-                os.makedirs(self.vis_path+'Whole/TD/'+self.td_images[int(id/30)][:-4], exist_ok=True)
+                folder_path = self.vis_path + 'Whole/' + ('TD/' if TD else 'VM/') + images[int(id / 30)][:-4]
+                os.makedirs(folder_path, exist_ok=True)
 
-                fig.savefig(self.vis_path+'Whole/TD/'+self.td_images[int(id/30)][:-4]+'/'+str(id-30*int(id/30))+'_'+str(ga_val)+'.png')
-                plt.close(fig)  # Close the figure to free memory
+                fig.savefig(folder_path+'/'+str(id-30*int(id/30))+'_'+str(ga_val)+'.png')
 
                 # Optional: Print out a status message
                 print(f'Saved Reconstruction image for GA value {ga_val:.2f}')
 
             if reconstructed >= 15:  # Remove or modify this condition as needed
+                break
+            reconstructed += 1
+
+    def save_reconstruction_images_GAN(self, TD = True):
+        model = self.model.to(self.device)
+        path = self.td_path if TD else self.vm_path
+        images = self.td_images if TD else self.vm_images
+
+        loader = val_loader(path, images, self.view, raw = self.raw, data='healthy' if TD else 'VM')
+
+        prev = ''
+        reconstructed = 0
+
+        for id, slice in enumerate(loader):
+            if images[int(id / 30)][:-4] == prev:
+                continue
+            prev = images[int(id / 30)][:-4]
+            img = slice['image'].to(self.device)
+            ga = slice['ga'].to(self.device)
+            original_ga = ga.clone().detach().cpu().numpy().item()  # Get original GA as a float
+            ga_variation = np.arange(20, 41, 1)  # Original range of gestational ages
+
+            # Append the original GA to the range and ensure all values are unique
+            ga_variation = np.unique(np.append(ga_variation, original_ga))
+
+            for ga_val in ga_variation:
+                ga_alt = torch.tensor([[ga_val]], dtype=torch.float).to(self.device)
+                final, rec_dic = model(img, ga_alt)
+                recon = np.rot90(rec_dic["x_recon"][0].detach().cpu().numpy().squeeze(), 1)
+                final_image = np.rot90(final[0].detach().cpu().numpy().squeeze(), 1)
+                original_img = np.rot90(img[0].detach().cpu().numpy().squeeze(), 1)
+
+                fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
+                ax1.imshow(original_img, cmap='gray')
+                ax1.set_title(f'Original Input GA:{original_ga:.2f}')
+                ax1.axis('off')
+
+                ax2.imshow(recon, cmap='gray')
+                ax2.set_title(f'x_recon GA: {ga_val:.2f}')
+                ax2.axis('off')
+
+                ax3.imshow(final_image, cmap='gray')
+                ax3.set_title(f'Final GA: {ga_val:.2f}')
+                ax3.axis('off')
+
+                # os.makedirs(self.vis_path+'Whole/TD/'+self.td_images[int(id/30)][:-4], exist_ok=True)
+                # fig.savefig(self.vis_path+'Whole/TD/'+self.td_images[int(id/30)][:-4]+'/'+str(id-30*int(id/30))+'_'+str(ga_val)+'.png')
+
+
+                folder_path = self.vis_path + 'Whole/' + ('TD/' if TD else 'VM/') + images[int(id / 30)][:-4]
+                os.makedirs(folder_path, exist_ok=True)
+
+                fig.savefig(folder_path+'/'+str(id-30*int(id/30))+'_'+str(ga_val)+'.png')
+
+                plt.close(fig)
+
+                print(f'Saved Reconstruction image for GA value {ga_val:.2f}')
+
+            if reconstructed >= 15:
                 break
             reconstructed += 1
 

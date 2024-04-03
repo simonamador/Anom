@@ -97,9 +97,6 @@ class EmbeddingLoss(torch.nn.Module):
     def forward(self, teacher_embeddings, student_embeddings):
         # print(f'LEN {len(output_real)}')
         layer_id = 0
-        # teacher_embeddings = teacher_embeddings[:-1]
-        # student_embeddings = student_embeddings[3:-1]
-        # print(f' Teacher: {len(teacher_embeddings)}, Student: {len(student_embeddings)}')
         for teacher_feature, student_feature in zip(teacher_embeddings, student_embeddings):
             if layer_id == 0:
                 total_loss = 0.5 * self.criterion(teacher_feature, student_feature)
@@ -326,5 +323,26 @@ class smgan():
 
         dis_loss = self.loss_fn(d_fake, d_fake_label) + self.loss_fn(d_real, d_real_label)
         gen_loss = self.loss_fn(g_fake, g_fake_label) * masks / torch.mean(masks)
+
+        return dis_loss.mean(), gen_loss.mean()
+
+class smgan_nomask():
+    def __init__(self): 
+        self.loss_fn = nn.MSELoss()
+    
+    def __call__(self, netD, fake, real, ga=None): 
+        fake_detach = fake.detach()
+
+        g_fake = netD(fake, ga)
+        d_fake  = netD(fake_detach, ga)
+        d_real = netD(real, ga)
+
+        # No need to resize or apply masks to align sizes now
+        d_fake_label = torch.ones_like(d_fake).cuda()
+        d_real_label = torch.zeros_like(d_real).cuda()
+        g_fake_label = torch.ones_like(g_fake).cuda()
+
+        dis_loss = self.loss_fn(d_fake, d_fake_label) + self.loss_fn(d_real, d_real_label)
+        gen_loss = self.loss_fn(g_fake, g_fake_label)
 
         return dis_loss.mean(), gen_loss.mean()

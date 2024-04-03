@@ -77,7 +77,7 @@ class InpaintGenerator(BaseNetwork):
 
         self.encoder = nn.Sequential(
             nn.ReflectionPad2d(3),
-            nn.Conv2d(2, 64, 7),
+            nn.Conv2d(1, 64, 7), #############
             nn.ReLU(True),
             nn.Conv2d(64, 128, 4, stride=2, padding=1),
             nn.ReLU(True),
@@ -99,12 +99,12 @@ class InpaintGenerator(BaseNetwork):
 
         self.BOE_form = BOE_form
 
-    def forward(self, x, mask, ga=None):
-        x = torch.cat([x, mask], dim=1)  # Combine image and mask
+    def forward(self, x, ga=None):
+
         x = self.encoder(x)
 
-        if self.BOE_size and ga is not None:
-            # Encode GA
+        if ga is not None:
+            # Encode GA using your method
             encoded_ga = create_bi_partitioned_ordinal_vector(ga, self.BOE_size, self.BOE_form)
             # You may need to expand the dimensions to match x
             encoded_ga_expanded = encoded_ga.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, x.size(2), x.size(3))
@@ -193,7 +193,7 @@ class Discriminator(BaseNetwork):
 
     def forward(self, x, ga=None):
         # If GA is provided, process and integrate it
-        if self.BOE_size and ga is not None:
+        if ga is not None:
             # Encode GA and reshape into spatial dimensions
             encoded_ga = create_bi_partitioned_ordinal_vector(ga, self.BOE_size, self.BOE_form)
             encoded_ga = encoded_ga.float() # Convert encoded GA to float dtype to match layer weights

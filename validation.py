@@ -41,13 +41,13 @@ class Validator:
         self.model = Framework(parameters['slice_size'], parameters['z_dim'], 
                                parameters['ga_method'], parameters['device'], 
                                parameters['model_path'], self.ga, 
-                               parameters['ga_n'], th=self.th)
+                               parameters['ga_n'], th=self.th, BOE_form = parameters['BOE_type'])
         
         self.model.encoder, self.model.decoder, self.model.refineG = load_model(parameters['model_path'], parameters['VAE_model_type'], 
                                                                                 parameters['ga_method'], parameters['slice_size'], 
                                                                                 parameters['slice_size'], parameters['z_dim'], 
                                                                                 model=parameters['model_path'], pre = 'full', 
-                                                                                ga_n = parameters['ga_n'])
+                                                                                ga_n = parameters['ga_n'], BOE_form = parameters['BOE_type'])
         
         #self.model.encoder, self.model.decoder, self.model.refineG = load_model(model_path, base, method, 
         #                                                    parameters['slice_size'], parameters['slice_size'], z_dim, model=model, pre = 'full', ga_n=ga_n)
@@ -113,7 +113,7 @@ class Validator:
                                 self.vm_images[int(id/30)][:-4]+', '+
                                 str(id-30*int(id/30)+1)+', '+
                                 str(MAE)+', '+
-                                str(MSE)+', '+
+                                str(MSE*158)+', '+ #### MULTIPLIED BY SIZE (PIXEL N)
                                 str(SSIM.item())+', '
                                 +str(torch.mean(anomap.flatten()).item())+'\n')
             
@@ -316,7 +316,6 @@ class Validator:
         print('Saved graphic.')
 
     def mannwhitneyu(self):
-        # Existing code
         print('-----BEGINNING STATS-----')
         print('.')
         print('.')
@@ -520,20 +519,6 @@ class Validator:
             combined_tpr.append(smooth_tpr)
             auroc_scores.append(auroc)
 
-        # After looping through all views
-
-        # Plotting combined ROC curves
-        # plt.figure(figsize=(10, 10))
-        # for i, view_label in enumerate(view_labels):
-        #     plt.plot(combined_base_fpr, combined_tpr[i], label=f'{view_label} view (area = {auroc_scores[i]:.2f})')
-        # plt.plot([0, 1], [0, 1], 'k--')
-        # plt.xlabel('1 - Specificity')
-        # plt.ylabel('Sensitivity')
-        # plt.title('Receiver Operating Characteristic')
-        # plt.legend(loc='lower right')
-        # plt.savefig(base_val_path + 'Combined_AUROC.png')  # Saving to the base directory
-        # plt.close()
-
         plt.figure(figsize=(10, 10))
         for i, view_label in enumerate(view_labels):
             plt.plot(combined_base_fpr, combined_tpr[i], label=f'{view_label} View AUROC = {auroc_scores[i]:.2f}', linewidth=2)  # Increased line width for better visibility
@@ -551,41 +536,6 @@ class Validator:
         plt.savefig(base_val_path + 'Combined_AUROC.png', bbox_inches='tight', transparent=True, facecolor=ax.get_facecolor())
         plt.close()
 
-
-        
-
-        # # Print or handle the aggregated statistics as needed
-        # for stat in all_stats:
-        #     print(f"{stat['View']} View:")
-        #     print(f"U Statistics (MSE, MAE, Anomaly): {stat['U_Stats']}")
-        #     print(f"P-values (MSE, MAE, Anomaly): {stat['P_Values']}")
-        #     print("\n")
-
-        # fig, ax = plt.subplots(figsize=(10, 6))  # Adjust size as needed for your table
-        # ax.axis('off')  
-
-        # def format_p_value(p): return "<0.01" if p < 0.01 else f"{p:.2f}"
-
-        # # Initialize table data with headers
-        # table_data = [['View', 'U (MSE)', 'U (MAE)', 'U (Anomaly)', 'P (MSE)', 'P (MAE)', 'P (Anomaly)']]
-
-        # # Populate the table data with your statistics
-        # for stat in all_stats:
-        #     # Process each row's p-values
-        #     formatted_p_values = [format_p_value(p) for p in stat['P_Values']]
-        #     # Append the row to your table data
-        #     table_data.append([stat['View']] + stat['U_Stats'] + formatted_p_values)
-
-        # # Create and configure the table
-        # fig, ax = plt.subplots(figsize=(14, 6))  
-        # ax.axis('off') 
-        # table = ax.table(cellText=table_data, loc='center', cellLoc='center')
-        # table.auto_set_font_size(False)
-        # table.set_fontsize(10)
-        # table.scale(1.2, 1.2)  
-        # plt.tight_layout()
-        # plt.savefig(base_val_path + 'Combined_Statistics.png') 
-        # plt.close()
 
         def format_p_value(p): return ("<0.01", True) if p < 0.01 else (f"{p:.4f}", False)
 
@@ -713,7 +663,6 @@ class Validator:
         # Combine data from all views into a single DataFrame
         combined_df = pd.concat(view_data, ignore_index=True)
 
-        # Now, create your visualizations
         # Transform data to long format for Altair
         long_df = combined_df.melt(id_vars=['View', 'Class', 'Slide_ID'], 
                                 value_vars=['MSE', 'MAE', 'Anomaly'], 

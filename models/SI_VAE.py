@@ -17,7 +17,8 @@ class Encoder(nn.Module):
             z_dim,
             method,
             model: str = 'default',
-            ga_n = 100
+            ga_n = 100,
+            BOE_form = 'BOE'
         ):
 
         method_type = ['bpoe']
@@ -45,11 +46,35 @@ class Encoder(nn.Module):
         self.flat_n = n_h * n_w * ch * 8
         self.linear = nn.Linear(self.flat_n,z_dim)
 
+        BOE_forms = {
+            'BOE': self.calculate_ga_index,
+            'EBOE': self.calculate_ga_index_exp,
+            'inv_BOE': self.inv_calculate_ga_index_exp,
+            'inv_inv_BOE': self.inv_inv_calculate_ga_index_exp
+        }
+
+        self.BOE_form = BOE_forms[BOE_form]
+
     def calculate_ga_index(self,ga):
         # Map GA to the nearest increment starting from 20 (assuming a range of 20-40 GA)
         increment = (40-20)/self.size
         ga_mapped = torch.round((ga - 20) / increment)
         return ga_mapped
+    
+    def calculate_ga_index_exp(self, ga, a = 1.645, b = 2.688, α = 20, β = 40):
+        ga_mapped = torch.round( (torch.tensor(self.size) / (torch.exp(torch.tensor(a + b)))) * 
+                                (torch.exp(torch.tensor(a) + torch.tensor(b) * ((ga - α) /  (β - α)) )) )
+        return ga_mapped  
+    
+    def inv_calculate_ga_index_exp(self, ga, a = 1.645, b = 2.688, α = 20, β = 40):
+        ga_mapped = torch.round( (torch.tensor(self.size) / (torch.exp(torch.tensor(a + b)))) * 
+                                (torch.exp(torch.tensor(a) + torch.tensor(b) * ((-ga + β) /  (β - α)) )) )
+        return ga_mapped 
+    
+    def inv_inv_calculate_ga_index_exp(self, ga, a = 1.645, b = 2.688, α = 20, β = 40):
+        ψ = self.calculate_ga_index_exp(40, a, b, α, β )
+        ga_mapped = - self.inv_calculate_ga_index_exp(ga, a, b, α, β) + ψ
+        return ga_mapped 
    
     def create_ordinal_vector(self, gas):
         # https://link.springer.com/chapter/10.1007/978-3-030-32251-9_82
@@ -74,7 +99,7 @@ class Encoder(nn.Module):
         threshold_index = self.size//2
         device = gas.device
         batch_size = gas.size(0)
-        ga_indices = self.calculate_ga_index(gas)
+        ga_indices = self.BOE_form(gas)
         vectors = torch.full((batch_size, self.size), -1, device=device)  # Default fill with -1
 
         for i in range(batch_size):

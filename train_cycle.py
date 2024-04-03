@@ -4,6 +4,7 @@
 import torch
 from torch.nn import DataParallel
 import torch.optim as optim
+import torch.nn.functional as F
 
 import matplotlib.pyplot as plt
 
@@ -13,10 +14,14 @@ from utils import loss as loss_lib
 from utils.debugging_printers import *
 from utils.BOE import *
 
+
+from models.csgan.cycle_GAN import CycleGANModel
+
 from time import time
 import copy
 
 import os
+from bunch_py3 import *
 
 class Trainer:
     def __init__(self, parameters):
@@ -60,16 +65,9 @@ class Trainer:
                                           ga_n = parameters['ga_n'],  BOE_form = parameters['BOE_type'])
             self.model.encoder = encoder
             self.model.decoder = decoder
-        if parameters['pretrained'] == 'refine':
-            refineG, refineD = load_model(parameters['pretrained_path'], parameters['VAE_model_type'], 
-                                          parameters['ga_method'], parameters['slice_size'],
-                                          parameters['slice_size'], parameters['z_dim'], 
-                                          model=parameters['type'], pre = parameters['pretrained'],
-                                          ga_n = parameters['ga_n'],  BOE_form = parameters['BOE_type'])
-            self.model.refineG = refineG
-            self.model.refineD = refineD
+
         prGreen('Model successfully instanciated...')
-        self.pre = None # parameters['pretrained']
+        self.pre = parameters['pretrained']
 
         
         self.z_dim = parameters['z_dim']
@@ -89,14 +87,57 @@ class Trainer:
         # Optimizers
         self.optimizer_e = optim.Adam(self.model.encoder.parameters(), lr=1e-4, weight_decay=1e-5) # lr=1e-5, weight_decay=1e-6)
         self.optimizer_d = optim.Adam(self.model.decoder.parameters(), lr=1e-4, weight_decay=1e-5)  # lr=1e-5, weight_decay=1e-6) 
-        self.optimizer_netG = optim.Adam(self.model.refineG.parameters(), lr=5.0e-5)
-        self.optimizer_netD = optim.Adam(self.model.refineD.parameters(), lr=5.0e-5)
+        # self.optimizer_netG = optim.Adam(self.model.refineG.parameters(), lr=5.0e-5)
+        # self.optimizer_netD = optim.Adam(self.model.refineD.parameters(), lr=5.0e-5)
 
-        # TODO
-        # self.e_scheduler = MultiStepLR(self.optimizer_e, milestones=(100,), gamma=0.1)
-        # self.d_scheduler = MultiStepLR(self.optimizer_d, milestones=(100,), gamma=0.1)
-        # self.netG_scheduler = MultiStepLR(self.optimizer_netG, milestones=(100,), gamma=0.1)
-        # self.netD_scheduler = MultiStepLR(self.optimizer_netD, milestones=(100,), gamma=0.1)
+        opt = Bunch({
+            'lambda_identity': 0.1,     # First, try using identity loss `--lambda_identity 1.0` or `--lambda_identity 0.1`. 
+                                            # We observe that the identity loss makes the generator to be more conservative and make fewer unnecessary changes. 
+                                            # However, because of this, the change may not be as dramatic.
+                                            # use identity mapping. Setting lambda_identity other than 0 has an effect of scaling the weight of the identity mapping loss. 
+                                            # For example, if the weight of the identity loss should be 10 times smaller than the weight of the reconstruction loss, 
+                                            # please set lambda_identity = 0.1
+            'input_nc': 1,              # # of input image channels: 3 for RGB and 1 for grayscale
+            'output_nc': 1,             # # of output image channels: 3 for RGB and 1 for grayscale
+            'ngf': 64,                  # # of gen filters in the last conv layer
+            'netG': 'resnet_9blocks',   # specify generator architecture [resnet_9blocks | resnet_6blocks | unet_256 | unet_128] 
+            'norm': 'instance',         # instance normalization or batch normalization [instance | batch | none]
+            'no_dropout': True,         # no dropout for the generator
+            'init_type': 'normal',      # network initialization [normal | xavier | kaiming | orthogonal]
+            'init_gain': 0.02,          # scaling factor for normal, xavier and orthogonal.
+            'gpu_ids': [0,1,2],         # Please set`--gpu_ids -1` to use CPU mode; set `--gpu_ids 0,1,2` for multi-GPU mode. You need a large batch size (e.g., `--batch_size 32`) to benefit from multiple GPUs.
+            'ndf': 64,                  # # of discrim filters in the first conv layer
+            'netD': 'basic',            # specify discriminator architecture [basic | n_layers | pixel]. 
+                                            # The basic model is a 70x70 PatchGAN. n_layers allows you to specify the layers in the discriminator
+            'n_layers_D': 3,            # only used if netD==n_layers
+            'pool_size': 50,            # the size of image buffer, if pool_size=0, no buffer will be created
+            'gan_mode': 'lsgan',        # the type of GAN objective. [vanilla| lsgan | wgangp]. 
+                                            # vanilla GAN loss is the cross-entropy objective used in the original GAN paper.
+            'direction': 'AtoB',        # AtoB or BtoA
+            'lr': 0.0002,               # initial learning rate for adam
+            'beta1': 0.5,               # momentum term of adam 
+                                            #     parser.add_argument('--lambda_identity', type=float, default=0.5, help='')
+            'lambda_A': 10.0,           # weight for cycle loss (A -> B -> A)
+            'lambda_B': 10.0,           # weight for cycle loss (B -> A -> B)
+            'isTrain': True,
+            'checkpoints_dir': 'Test',
+            'name': 'Test',
+            'continue_train': False,
+            'load_iter': 0,             # which iteration to load? if load_iter > 0, the code will load models by iter_[load_iter]; otherwise, the code will load models by [epoch]
+            'lr_policy': 'linear',      # learning rate policy. [linear | step | plateau | cosine]
+            'epoch_count': 1,           # the starting epoch count, we save the model by <epoch_count>, <epoch_count>+<save_latest_freq>, ...
+            'n_epochs': 600,            # number of epochs with the initial learning rate
+            'n_epochs_decay': 400,      # number of epochs to linearly decay learning rate to zero
+            'verbose': True,
+            'preprocess': 'crop', # scaling and cropping of images at load time [resize_and_crop | crop | scale_width | scale_width_and_crop | none]
+            'load_size': 160,
+            'crop_size': 160
+            }
+        )
+
+        ### Cycle GAN ###
+        self.cycle_GAN = CycleGANModel(opt)
+        self.cycle_GAN.setup(opt) 
 
         self.scale = 1 / (parameters['slice_size'] ** 2)  # normalize by images size (channels * height * width)
         self.gamma_r = 1e-8
@@ -122,7 +163,7 @@ class Trainer:
         print(f'{parameters["slice_size"]=}')
         prGreen('Optimizers successfully loaded...')
 
-        self.BOE_form = parameters['BOE_type']
+        self.BOE_type = parameters['BOE_type']
 
     def train(self, epochs, b_loss):
         
@@ -137,16 +178,16 @@ class Trainer:
 
         self.best_loss = 10000 # Initialize best loss (to identify the best-performing model)
 
-        epoch_losses = []
 
         # Trains for all epochs
         for epoch in range(epochs):
+
+              
             
             # Initialize models in device
             encoder = DataParallel(self.model.encoder).to(self.device).train()
             decoder = DataParallel(self.model.decoder).to(self.device).train()
-            refineG = DataParallel(self.model.refineG).to(self.device).train()
-            refineD = DataParallel(self.model.refineD).to(self.device).train()
+            # cycle_GAN = DataParallel(self.cycle_GAN).to(self.device).train()
 
             # print('-'*15)
             # print(f'epoch {epoch+1}/{epochs}')
@@ -170,7 +211,7 @@ class Trainer:
                 ga = data['ga'].to(self.device) if self.ga else None
                 
                 count_images += self.batch 
-                encoded_ga = create_bi_partitioned_ordinal_vector(ga, self.ga_n, self.BOE_form) if self.ga_n else None
+                encoded_ga = create_bi_partitioned_ordinal_vector(ga, self.ga_n) if self.ga_n else None
                 noise_batch = torch.randn(size=(self.batch, self.z_dim//2)).to(self.device) 
                 noise_batch = torch.cat((noise_batch,encoded_ga), 1)
                 real_batch = images.to(self.device)
@@ -285,7 +326,7 @@ class Trainer:
                     batch_emb += loss_emb.cpu().item() * images.shape[0]
                     
                 else:
-                    z, real_mu, real_logvar, anomaly_embeddings = self.model.encode(real_batch)
+                    z, real_mu, real_logvar, anomaly_embeddings = self.model.encode(real_batch, ga)
                     rec = self.model.decoder(z)
                     diff_kls = -1
                     batch_kls_real = -1
@@ -300,106 +341,37 @@ class Trainer:
 
                 if self.pre is None or self.pre == 'base': 
 
-                    for param in self.model.encoder.parameters():
-                        param.requires_grad = False
-                    for param in self.model.decoder.parameters():
-                        param.requires_grad = False
-                    for param in self.model.refineG.parameters():
-                        param.requires_grad = True
-                    for param in self.model.refineD.parameters():
-                        param.requires_grad = True
+                    padding = 1
+                    real_batch_padded = F.pad(real_batch, (padding, padding, padding, padding), "constant", 0)
+                    rec_padded = F.pad(rec.detach(), (padding, padding, padding, padding), "constant", 0)
 
-                    # Obtain anomaly metric, use it to generate the masks
-                    saliency, anomalies = self.model.anomap.anomaly(rec.detach(), real_batch)
-                    anomalies = anomalies * saliency
-                    masks = self.model.anomap.mask_generation(anomalies)
+                    self.cycle_GAN.set_input(rec_padded, real_batch_padded, 'AtoB')         # unpack data from dataset and apply preprocessing
+                    self.cycle_GAN.optimize_parameters()   # calculate loss functions, get gradients, update network weights
 
-                    x_ref = (real_batch * (1 - masks).float()) + masks
+            if self.pre is None or self.pre == 'base': self.cycle_GAN.update_learning_rate()
 
-                    # Refined reconstruction through AOT-GAN
-                    y_ref = self.model.refineG(x_ref, masks, ga) 
                     
-                    y_ref = torch.clamp(y_ref, 0, 1)
-
-                    zero_pad = torch.nn.ZeroPad2d(1)
-                    y_ref = zero_pad(y_ref)
-
-                    # Only include the parts from the refined reconstruction which the mask
-                    # identified as anomalous
-                    ref_recon = (1-masks)*real_batch + masks*y_ref
-
-                    # Losses for AOT-GAN
-                    losses = {}
-                    for name, weight in self.loss_keys.items():
-                        losses[name] = weight * self.losses[name](y_ref, real_batch)
-
-                    dis_loss, gen_loss = self.adv_loss(self.model.refineD, ref_recon, real_batch, masks, ga)
-
-                    losses['advg'] = gen_loss * self.adv_weight
                     
-                    self.optimizer_netG.zero_grad()
-                    self.optimizer_netD.zero_grad()
-                    sum(losses.values()).backward()
-                    dis_loss.backward()
-                    self.optimizer_netG.step()
-                    self.optimizer_netD.step()
-
-                    batch_netGD_rec += sum(losses.values()).cpu().item() * images.shape[0]
-                    batch_netG_loss += losses['advg'].cpu().item() * images.shape[0]
-                    batch_netD_loss += dis_loss.cpu().item() * images.shape[0]
 
             # Testing
             test_dic = self.test(b_loss)
             val_loss = test_dic["losses"] 
-            metrics = test_dic["metrics"] 
             images = test_dic["images"] 
 
-            epoch_loss_d_kls = diff_kls / count_images if count_images > 0 else diff_kls
-            epoch_loss_kls_real = batch_kls_real / count_images if count_images > 0 else batch_kls_real
-            epoch_loss_kls_fake = batch_kls_fake / count_images if count_images > 0 else batch_kls_fake
-            epoch_loss_kls_rec = batch_kls_rec / count_images if count_images > 0 else batch_kls_rec
-            epoch_loss_rec_errs = batch_rec_errs / count_images if count_images > 0 else batch_rec_errs
-            epoch_loss_exp_f = batch_exp_elbo_f / count_images if count_images > 0 else batch_exp_elbo_f
-            epoch_loss_exp_r = batch_exp_elbo_r / count_images if count_images > 0 else batch_exp_elbo_r
-            epoch_loss_emb = batch_emb / count_images if count_images > 0 else batch_emb
-            epoch_loss_netGD_rec = batch_netGD_rec / count_images if count_images > 0 else batch_netGD_rec
-            epoch_loss_netG_loss = batch_netG_loss / count_images if count_images > 0 else batch_netG_loss
-            epoch_loss_netD_loss = batch_netD_loss / count_images if count_images > 0 else batch_netD_loss
+ 
 
-            epoch_losses.append(epoch_loss_rec_errs)
 
             end_time = time()
-            print('Epoch: {} \tTraining Loss: {:.6f} , computed in {} seconds for {} samples'.format(
-                epoch, epoch_loss_rec_errs, end_time - start_time, count_images))
-            
-            print({"Train/Loss_DKLS": epoch_loss_d_kls, '_step_': epoch})
-            print({"Train/Loss_REAL": epoch_loss_kls_real, '_step_': epoch})
-            print({"Train/Loss_FAKE": epoch_loss_kls_fake, '_step_': epoch})
-            print({"Train/Loss_REC": epoch_loss_kls_rec, '_step_': epoch})
-            print({"Train/Loss_REC_ERRS": epoch_loss_rec_errs, '_step_': epoch})
-            print({"Train/Loss_EXP_F": epoch_loss_exp_f, '_step_': epoch})
-            print({"Train/Loss_EXP_R": epoch_loss_exp_r, '_step_': epoch})
-            print({"Train/Loss_EMB": epoch_loss_emb, '_step_': epoch})
-            print({"Train/Loss_netGD_REC": epoch_loss_netGD_rec, '_step_': epoch})
-            print({"Train/Loss_netG": epoch_loss_netG_loss, '_step_': epoch})
-            print({"Train/Loss_netD": epoch_loss_netD_loss, '_step_': epoch})
+            print('Epoch: {} \t , computed in {} seconds for {} samples'.format(
+                epoch, end_time - start_time, count_images))
 
-            losses = {
-                "Loss_DKLS": epoch_loss_d_kls,
-                "Loss_REAL": epoch_loss_kls_real,
-                "Loss_FAKE": epoch_loss_kls_fake,
-                "Loss_REC": epoch_loss_kls_rec,
-                "Loss_REC_ERRS": epoch_loss_rec_errs,
-                "Loss_EXP_F": epoch_loss_exp_f,
-                "Loss_EXP_R": epoch_loss_exp_r,
-                "Loss_EMB": epoch_loss_emb,
-                "Loss_netGD_REC": epoch_loss_netGD_rec,
-                "Loss_netG": epoch_loss_netG_loss,
-                "Loss_netD": epoch_loss_netD_loss
-            }
+            cycle_losses = self.cycle_GAN.get_current_losses()
+            message = ''
+            for k, v in cycle_losses.items():
+                message += '%s: %.3f ' % (k, v)
 
             # Assuming you have variables `current_epoch`, `total_epochs`, `current_val_loss`, and `images` defined:
-            self.log(epoch=epoch, epochs=epochs, losses=losses, images=images, val_loss=val_loss, metrics=metrics)
+            self.log(epoch=epoch, epochs=epochs, tr_losses=message, images=images, val_losses=val_loss)
 
             #self.log(epoch, epochs, [epoch_ed_loss, epoch_refineG_loss, epoch_refineD_loss] , val_loss, metrics, images, pretrained = self.pre)
 
@@ -408,6 +380,7 @@ class Trainer:
     def test(self, b_loss):
         # Setting model for evaluation
         self.model.eval()
+        self.cycle_GAN.eval()
 
         base_loss, refineG_loss, refineD_loss = 0.0, 0.0, 0.0
         mse_loss, mae_loss, ssim, anom = 0.0, 0.0, 0.0, 0.0
@@ -419,117 +392,105 @@ class Trainer:
 
                 # Run the whole framework forward, no need to do each component separate
                 
-                ref_recon, res_dic = self.model(real_batch, ga)
-
-                # Obtain the anomaly metric from the model
-                anomap = abs(ref_recon-real_batch)*self.model.anomap.saliency_map(ref_recon,real_batch)
+                # _, res_dic = self.model(real_batch, ga)
+                z, _, _, _ = self.model.encode(real_batch, ga)
+                rec = self.model.decoder(z)
 
                 # Calc the losses
 
                 #   encoder-decoder loss
-                ed_loss = self.base_loss[b_loss](res_dic["x_recon"],real_batch)
+                # ed_loss = self.base_loss[b_loss](res_dic["x_recon"],real_batch)
 
                 #   refinement loss
                 losses = {}
                 for name, weight in self.loss_keys.items():
-                    losses[name] = weight * self.losses[name](res_dic["y_ref"], real_batch)
+                    losses[name] = weight * self.losses[name](rec, real_batch)
 
-                dis_loss, gen_loss = self.adv_loss(self.model.refineD, ref_recon, real_batch, res_dic["mask"], ga)
+                padding = 1
+                real_batch_padded = F.pad(real_batch, (padding, padding, padding, padding), "constant", 0)
+                rec_padded = F.pad(rec, (padding, padding, padding, padding), "constant", 0)
 
-                losses['advg'] = gen_loss * self.adv_weight
+                self.cycle_GAN.set_input(rec_padded, real_batch_padded, 'AtoB') 
+                self.cycle_GAN.test() 
+                visuals = self.cycle_GAN.get_current_visuals() 
+                cycle_losses = self.cycle_GAN.get_current_losses()
+                message = ''
+                for k, v in cycle_losses.items():
+                    message += '%s: %.3f ' % (k, v)
 
-                base_loss += ed_loss
-                refineG_loss += sum(losses.values()).cpu().item()
-                refineD_loss += dis_loss.cpu().item()
-
-                # Calc the metrics
-                mse_loss += loss_lib.l2_loss(res_dic["y_ref"], real_batch).item()
-                mae_loss += loss_lib.l1_loss(res_dic["y_ref"], real_batch).item()
-                ssim     += 1 - loss_lib.ssim_loss(res_dic["y_ref"], real_batch).item()
-                anom     += torch.mean(anomap.flatten()).item()
-
-            base_loss /= len(self.loader["ts"])
-            refineG_loss /= len(self.loader["ts"])
-            refineD_loss /= len(self.loader["ts"])
-
-            mse_loss /= len(self.loader["ts"])
-            mae_loss /= len(self.loader["ts"])
-            ssim /= len(self.loader["ts"])
-            anom /= len(self.loader["ts"])    
+            base_loss /= len(self.loader["ts"])            
 
             # Images dic for visualization
-            images = {"input": real_batch[0][0], "recon": res_dic["x_recon"][0], "saliency": res_dic["saliency"][0],
-                      "mask": -res_dic["mask"][0], "ref_recon": ref_recon[0], "anomaly": anomap[0][0]}    
+            images = {"real_A": visuals['real_A'][0], "fake_B": visuals['fake_B'][0], "rec_A": visuals['rec_A'][0],
+                      "real_B": visuals['real_B'][0], "fake_A": visuals['fake_A'][0], "rec_B": visuals['rec_B'][0]
+                    }    
         
-        return {'losses': [ed_loss, refineG_loss, refineD_loss],'metrics': [mse_loss, mae_loss, ssim, anom], 'images': images}
+        return {'losses': [message], 'images': images}
 
-    def log(self, epoch, epochs, losses, images, val_loss, metrics):
+    def log(self, epoch, epochs, tr_losses, images, val_losses):
         # Format the new losses for logging
-        formatted_losses = ', '.join([f'{key}: {(value.item() if isinstance(value, torch.Tensor) else value):.4f}' for key, value in losses.items()])
-        header = 'Epoch, ED Loss, RefineG Loss, RefineD Loss, MSE Loss, MAE Loss, SSIM, Anom\n'
+        # formatted_losses = ', '.join([f'{key}: {(value.item() if isinstance(value, torch.Tensor) else value):.4f}' for key, value in losses.items()])
+        # header = 'Epoch, ED Loss, RefineG Loss, RefineD Loss, MSE Loss, MAE Loss, SSIM, Anom\n'
         log_file_path = f'{self.model_path}/training_log.csv'
 
         if not os.path.exists(log_file_path) or os.stat(log_file_path).st_size == 0:
             with open(log_file_path, 'w') as file:
-                file.write(header)
+                file.write('')
                 
-        primary_val_loss = val_loss[0] 
-
-        print(f'{losses=}')
-
-        losses_str = ', '.join([f'{float(loss):.4f}' if loss.replace('.', '', 1).isdigit() else loss for loss in losses])
-        val_losses_str = ', '.join([f'{val:.4f}' for val in val_loss])
-        metrics_str = ', '.join([f'{metric:.4f}' for metric in metrics])
+        # primary_val_loss = val_loss[0] 
+        print(f'Epoch {epoch+1}')
+        print(f'Training losses: {tr_losses=}')
 
 
-        components = ['encoder', 'decoder', 'refineG', 'refineD']
-        for component in components:
+        components_ED = ['encoder', 'decoder']
+        components_Cycle = ['netG_A', 'netG_B', 'netD_A', 'netD_B']
+
+        for component in components_ED:
             torch.save({
                 'epoch': epoch + 1,
                 component: getattr(self.model, component).state_dict(),
             }, f'{self.model_path}/{component}_latest.pth')
 
-        # Save and plot model components every 50 epochs or in the first or last epoch
-        if (epoch == 0) or ((epoch + 1) % 50 == 0) or ((epoch + 1) == epochs):
-            for component in components:
+        
+        for component in components_Cycle:
+            torch.save({
+                'epoch': epoch + 1,
+                component: getattr(self.cycle_GAN, component).state_dict(),
+            }, f'{self.model_path}/{component}_latest.pth')
+
+        # Save and plot model components every n epochs or in the first or last epoch
+        if (epoch == 0) or ((epoch + 1) % 10 == 0) or ((epoch + 1) == epochs):
+            for component in components_ED:
                 torch.save({'epoch': epoch + 1, component: getattr(self.model, component).state_dict()},
                         f'{self.model_path}/{component}_{epoch + 1}.pth')
+            for component in components_Cycle:
+                torch.save({
+                    'epoch': epoch + 1,
+                    component: getattr(self.cycle_GAN, component).state_dict(),
+                }, f'{self.model_path}/{component}_{epoch + 1}.pth')
             
             # Plot and save the progress image
             progress_im = self.plot(images)
             progress_im.savefig(f'{self.image_path}epoch_{epoch+1}.png')
 
-        # Save the best model components if current validation loss is lower than the best known loss
-        if isinstance(primary_val_loss, torch.Tensor):
-            primary_val_loss_value = primary_val_loss.item()  # Convert tensor to a Python number
-        else:
-            primary_val_loss_value = primary_val_loss  # It's already a number, not a tensor
-        if primary_val_loss_value < self.best_loss:
-            self.best_loss = primary_val_loss
-            for component in components:
-                torch.save({
-                    'epoch': epoch + 1,
-                    component: getattr(self.model, component).state_dict(),
-                }, f'{self.model_path}/{component}_best.pth')
-            print(f'Saved best model components at epoch {epoch+1} with primary validation loss {primary_val_loss_value:.4f}')
+        
 
-        log_entry = f'{epoch+1}, {losses_str}, {val_losses_str}, {metrics_str}\n'
+        log_entry = f'{epoch+1}, Tr Losses: {tr_losses}, Val Losses: {val_losses}\n'
         with open(log_file_path, 'a') as file:
             file.write(log_entry)
 
-        print(f'Epoch {epoch+1}, Losses: {losses_str}, Val Losses: {val_losses_str}, Metrics: {metrics_str}')
-        print(f'{self.best_loss=}')
+        
 
 
     def plot(self, images):
+  
         fig, axs = plt.subplots(2, 3, figsize=(10, 6))
-        names = [["input", "recon", "ref_recon"], ["saliency", "anomaly", "mask"]]
-        cmap_i = ["gray", "hot"]
+        names = [["real_A", "fake_B", "rec_A"], 
+                 ["real_B", "fake_A", "rec_B"]]
+
         for x in range(2):
             for y in range(3):
-                if x == 1 and y == 2:
-                    cmap_i[1] = "binary"
-                axs[x, y].imshow(images[names[x][y]].detach().cpu().numpy().squeeze(), cmap=cmap_i[x])
+                axs[x, y].imshow(images[names[x][y]].detach().cpu().numpy().squeeze(), cmap='gray')
                 axs[x, y].set_title(names[x][y])
                 axs[x, y].axis("off")
         plt.tight_layout()
