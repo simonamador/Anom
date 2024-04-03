@@ -22,4 +22,4 @@ for 2000 epochs with an Adam optimizer, learning rate of 1 x 10^-4, weight decay
 
 Other models being tested include the beta-VAE, and VAE which includes the gestational age as a factor.
 
-![Architecture](/assets/new_framework.png)
+![Architecture](/assets/Complete_Framework.png)
