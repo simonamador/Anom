@@ -7,8 +7,8 @@ import torch.optim as optim
 
 import matplotlib.pyplot as plt
 
-from models.framework_new import Framework
-from utils.config import loader, load_model_new_new
+from models.framework_VAEAOTGAN import Framework
+from utils.config import loader, load_model_VAEAOTGAN
 from utils import loss as loss_lib
 from utils.debugging_printers import *
 from utils.BOE import *
@@ -52,30 +52,23 @@ class Trainer:
                                parameters['ga_n'], th=self.th, BOE_form = parameters['BOE_type'])
 
         # Load pre-trained parameters
-        if parameters['pretrained'] == 'base':
-            encoder, decoder = load_model_new(parameters['pretrained_path'], parameters['VAE_model_type'], 
-                                          parameters['ga_method'], parameters['slice_size'], 
-                                          parameters['slice_size'], parameters['z_dim'], 
-                                          model=parameters['type'], pre = parameters['pretrained'], 
-                                          ga_n = parameters['ga_n'],  BOE_form = parameters['BOE_type'])
+        if parameters['pretrained']:
+            encoder, decoder = load_model_VAEAOTGAN(
+                                          model_path =  parameters['pretrained_path'], 
+                                          ga_method =   parameters['ga_method'], 
+                                          w =           parameters['slice_size'], 
+                                          h =           parameters['slice_size'], 
+                                          z_dim =       parameters['z_dim'], 
+                                          model=        parameters['type'], 
+                                          ga_n =        parameters['ga_n'],  
+                                          BOE_form =    parameters['BOE_type'])
             self.model.encoder = encoder
             self.model.decoder = decoder
-        if parameters['pretrained'] == 'refine':
-            refineG, refineD = load_model_new(parameters['pretrained_path'], parameters['VAE_model_type'], 
-                                          parameters['ga_method'], parameters['slice_size'],
-                                          parameters['slice_size'], parameters['z_dim'], 
-                                          model=parameters['type'], pre = parameters['pretrained'],
-                                          ga_n = parameters['ga_n'],  BOE_form = parameters['BOE_type'])
-            self.model.refineG = refineG
-            self.model.refineD = refineD
-        prGreen('Model successfully instanciated...')
-        self.pre = parameters['pretrained']
 
-        
+        prGreen('Model successfully instanciated...')
+        self.pre = parameters['pretrained']        
         self.z_dim = parameters['z_dim']
         self.batch = parameters['batch']
-
-        ### VAE ADVERSARIAL LOSS ### TODO
         
         prGreen('Losses successfully loaded...')
 
@@ -88,8 +81,7 @@ class Trainer:
         
         # Optimizers
         self.optimizer_e = optim.Adam(self.model.encoder.parameters(), lr=1e-4, weight_decay=1e-5) # lr=1e-5, weight_decay=1e-6)
-        self.optimizer_d = optim.Adam(self.model.decoder.parameters(), lr=1e-4, weight_decay=1e-5)  # lr=1e-5, weight_decay=1e-6) 
-        self.optimizer_netG = optim.Adam(self.model.refineG.parameters(), lr=5.0e-5)
+        self.optimizer_d = optim.Adam(self.model.decoder.parameters(), lr=1e-4, weight_decay=1e-5)  # lr=1e-5, weight_decay=1e-6)
         self.optimizer_netD = optim.Adam(self.model.refineD.parameters(), lr=5.0e-5)
 
         # TODO
@@ -134,7 +126,7 @@ class Trainer:
         self.writer = open(self.tensor_path, 'a')
         self.writer.write('Epoch, tr_ed, tr_g, tr_d, v_ed, v_g, v_d, SSIM, MSE, MAE, Anomaly'+'\n')
 
-        self.best_loss = 10000 # Initialize best loss (to identify the best-performing model)
+        self.best_loss = float("inf") # Initialize best loss (to identify the best-performing model
 
         epoch_losses = []
 
@@ -142,15 +134,8 @@ class Trainer:
         for epoch in range(epochs):
             
             # Initialize models in device
-            encoder = DataParallel(self.model.encoder).to(self.device).train()
-            decoder = DataParallel(self.model.decoder).to(self.device).train()
-            refineG = DataParallel(self.model.refineG).to(self.device).train()
-            refineD = DataParallel(self.model.refineD).to(self.device).train()
-
-            # print('-'*15)
-            # print(f'epoch {epoch+1}/{epochs}')
-
-            epoch_ed_loss, epoch_refineG_loss, epoch_refineD_loss = 0.0, 0.0, 0.0
+            DataParallel(self.model.encoder).to(self.device).train()
+            DataParallel(self.model.decoder).to(self.device).train()
 
             start_time = time()
 
@@ -162,9 +147,6 @@ class Trainer:
             for data in current_loader:
 
                 images = data['image'].to(self.device)
-                # print(f'{images.shape=}')
-                
-                # transformed_images = copy.deepcopy(images)
 
                 ga = data['ga'].to(self.device) if self.ga else None
                 
@@ -174,125 +156,106 @@ class Trainer:
                 noise_batch = torch.cat((noise_batch,encoded_ga), 1)
                 real_batch = images.to(self.device)
 
-                
-
                 # =========== Update E ================
-                if self.pre is None or self.pre == 'refine':
-                    for param in self.model.encoder.parameters():
-                        param.requires_grad = True
-                    for param in self.model.decoder.parameters():
-                        param.requires_grad = False
-                    for param in self.model.refineG.parameters():
-                        param.requires_grad = False
-                    for param in self.model.refineD.parameters():
-                        param.requires_grad = False
-
-                    fake = self.model.sample(noise_batch)
-                    
-                    z, real_mu, real_logvar, anomaly_embeddings = self.model.encode(real_batch, ga)
-
-                    # Reconstruct image
-                    rec = self.model.decoder(z)
-                    
-                    #z, real_mu, real_logvar, anomaly_embeddings = self.model.encode(real_batch, ga)
-                    _, _, _, healthy_embeddings = self.model.encode(rec.detach(), ga)
                 
-                    loss_emb = self.embedding_loss(anomaly_embeddings['embeddings'], healthy_embeddings['embeddings'])
+                for param in self.model.encoder.parameters():
+                    param.requires_grad = True
+                for param in self.model.decoder.parameters():
+                    param.requires_grad = False
+                for param in self.model.refineD.parameters():
+                    param.requires_grad = False
 
-                    loss_rec = loss_lib.calc_reconstruction_loss(real_batch, rec, loss_type="mse", reduction="mean")
-                    lossE_real_kl = loss_lib.calc_kl(real_logvar, real_mu, reduce="mean")
-                    rec_rec, z_dict = self.model.ae(rec.detach(), deterministic=False, ga=ga)
-                    rec_mu, rec_logvar, z_rec = z_dict['z_mu'], z_dict['z_logvar'], z_dict['z']
-                    rec_fake, z_dict_fake = self.model.ae(fake.detach(), deterministic=False, ga=ga)
-                    fake_mu, fake_logvar, z_fake = z_dict_fake['z_mu'], z_dict_fake['z_logvar'], z_dict_fake['z']
+                fake = self.model.sample(noise_batch)
+                
+                z, real_mu, real_logvar, anomaly_embeddings = self.model.encode(real_batch, ga)
+                rec = self.model.decoder(z)
+                
+                _, _, _, healthy_embeddings = self.model.encode(rec.detach(), ga)
+            
+                loss_emb = self.embedding_loss(anomaly_embeddings['embeddings'], healthy_embeddings['embeddings'])
 
-                    kl_rec = loss_lib.calc_kl(rec_logvar, rec_mu, reduce="none")
-                    kl_fake = loss_lib.calc_kl(fake_logvar, fake_mu, reduce="none")
+                loss_rec = loss_lib.calc_reconstruction_loss(real_batch, rec, loss_type="mse", reduction="mean")
+                lossE_real_kl = loss_lib.calc_kl(real_logvar, real_mu, reduce="mean")
+                rec_rec, z_dict = self.model.ae(rec.detach(), deterministic=False, ga=ga)
+                rec_mu, rec_logvar, z_rec = z_dict['z_mu'], z_dict['z_logvar'], z_dict['z']
+                rec_fake, z_dict_fake = self.model.ae(fake.detach(), deterministic=False, ga=ga)
+                fake_mu, fake_logvar, z_fake = z_dict_fake['z_mu'], z_dict_fake['z_logvar'], z_dict_fake['z']
 
-                    loss_rec_rec_e = loss_lib.calc_reconstruction_loss(rec, rec_rec, loss_type="mse", reduction='none')
-                    while len(loss_rec_rec_e.shape) > 1:
-                        loss_rec_rec_e = loss_rec_rec_e.sum(-1)
-                    loss_rec_fake_e = loss_lib.calc_reconstruction_loss(fake, rec_fake, loss_type="mse", reduction='none')
-                    while len(loss_rec_fake_e.shape) > 1:
-                        loss_rec_fake_e = loss_rec_fake_e.sum(-1)
+                kl_rec = loss_lib.calc_kl(rec_logvar, rec_mu, reduce="none")
+                kl_fake = loss_lib.calc_kl(fake_logvar, fake_mu, reduce="none")
 
-                    expelbo_rec = (-2 * self.scale * (self.beta_rec * loss_rec_rec_e + self.beta_neg * kl_rec)).exp().mean()
-                    expelbo_fake = (-2 * self.scale * (self.beta_rec * loss_rec_fake_e + self.beta_neg * kl_fake)).exp().mean()
+                loss_rec_rec_e = loss_lib.calc_reconstruction_loss(rec, rec_rec, loss_type="mse", reduction='none')
+                while len(loss_rec_rec_e.shape) > 1:
+                    loss_rec_rec_e = loss_rec_rec_e.sum(-1)
+                loss_rec_fake_e = loss_lib.calc_reconstruction_loss(fake, rec_fake, loss_type="mse", reduction='none')
+                while len(loss_rec_fake_e.shape) > 1:
+                    loss_rec_fake_e = loss_rec_fake_e.sum(-1)
 
-                    lossE_fake = 0.25 * (expelbo_rec + expelbo_fake)
-                    lossE_real = self.scale * (self.beta_rec * loss_rec + self.beta_kl * lossE_real_kl) # ELBO
+                expelbo_rec = (-2 * self.scale * (self.beta_rec * loss_rec_rec_e + self.beta_neg * kl_rec)).exp().mean()
+                expelbo_fake = (-2 * self.scale * (self.beta_rec * loss_rec_fake_e + self.beta_neg * kl_fake)).exp().mean()
 
-                    # lossE = lossE_real + lossE_fake + 0.005 * loss_emb     lambda = 0.005
-                    lossE = lossE_real + lossE_fake + 0.01 * loss_emb # lambda = 0.01
-                    self.optimizer_e.zero_grad()
-                    lossE.backward()
-                    self.optimizer_e.step()
+                lossE_fake = 0.25 * (expelbo_rec + expelbo_fake)
+                lossE_real = self.scale * (self.beta_rec * loss_rec + self.beta_kl * lossE_real_kl) # ELBO
 
-                    # ========= Update D ==================
-                    for param in self.model.encoder.parameters():
-                        param.requires_grad = False
-                    for param in self.model.decoder.parameters():
-                        param.requires_grad = True
-                    for param in self.model.refineG.parameters():
-                        param.requires_grad = False
-                    for param in self.model.refineD.parameters():
-                        param.requires_grad = False
+                # lossE = lossE_real + lossE_fake + 0.005 * loss_emb     lambda = 0.005
+                lossE = lossE_real + lossE_fake + 0.01 * loss_emb # lambda = 0.01
+                self.optimizer_e.zero_grad()
+                lossE.backward()
+                self.optimizer_e.step()
 
-                    fake = self.model.sample(noise_batch)
-                    rec = self.model.decoder(z.detach())
-                    loss_rec = loss_lib.calc_reconstruction_loss(real_batch, rec, loss_type="mse", reduction="mean")
+                # ========= Update D ==================
+                for param in self.model.encoder.parameters():
+                    param.requires_grad = False
+                for param in self.model.decoder.parameters():
+                    param.requires_grad = True
+                for param in self.model.refineD.parameters():
+                    param.requires_grad = True
 
-                    z_rec, rec_mu, rec_logvar,_ = self.model.encode(rec, ga)
+                fake = self.model.sample(noise_batch)
+                rec = self.model.decoder(z.detach())
+                loss_rec = loss_lib.calc_reconstruction_loss(real_batch, rec, loss_type="mse", reduction="mean")
 
-                    z_fake, fake_mu, fake_logvar,_ = self.model.encode(fake, ga)
+                z_rec, rec_mu, rec_logvar,_ = self.model.encode(rec, ga)
 
-                    rec_rec = self.model.decode(z_rec.detach())
-                    rec_fake = self.model.decode(z_fake.detach())
+                z_fake, fake_mu, fake_logvar,_ = self.model.encode(fake, ga)
 
-                    loss_rec_rec = loss_lib.calc_reconstruction_loss(rec.detach(), rec_rec, loss_type="mse", reduction="mean")
-                    loss_fake_rec = loss_lib.calc_reconstruction_loss(fake.detach(), rec_fake, loss_type="mse", reduction="mean")
+                rec_rec = self.model.decode(z_rec.detach())
+                rec_fake = self.model.decode(z_fake.detach())
 
-                    lossD_rec_kl = loss_lib.calc_kl(rec_logvar, rec_mu, reduce="mean")
-                    lossD_fake_kl = loss_lib.calc_kl(fake_logvar, fake_mu, reduce="mean")
+                loss_rec_rec = loss_lib.calc_reconstruction_loss(rec.detach(), rec_rec, loss_type="mse", reduction="mean")
+                loss_fake_rec = loss_lib.calc_reconstruction_loss(fake.detach(), rec_fake, loss_type="mse", reduction="mean")
 
-                    lossD = self.scale * (loss_rec * self.beta_rec + (
-                            lossD_rec_kl + lossD_fake_kl) * 0.5 * self.beta_kl + self.gamma_r * 0.5 * self.beta_rec * (
-                                                loss_rec_rec + loss_fake_rec))
+                lossD_rec_kl = loss_lib.calc_kl(rec_logvar, rec_mu, reduce="mean")
+                lossD_fake_kl = loss_lib.calc_kl(fake_logvar, fake_mu, reduce="mean")
 
-                    self.optimizer_d.zero_grad()
-                    lossD.backward()
-                    self.optimizer_d.step()
-                    if torch.isnan(lossD) or torch.isnan(lossE):
-                        print('is non for D')
-                        raise SystemError
-                    if torch.isnan(lossE):
-                        print('is non for E')
-                        raise SystemError
+                lossD = self.scale * (loss_rec * self.beta_rec + (
+                        lossD_rec_kl + lossD_fake_kl) * 0.5 * self.beta_kl + self.gamma_r * 0.5 * self.beta_rec * (
+                                            loss_rec_rec + loss_fake_rec))
+
+                self.optimizer_d.zero_grad()
+                lossD.backward()
+                self.optimizer_d.step()
+                if torch.isnan(lossD) or torch.isnan(lossE):
+                    print('is non for D')
+                    raise SystemError
+                if torch.isnan(lossE):
+                    print('is non for E')
+                    raise SystemError
+                
+                # ====================================
+                diff_kls += -lossE_real_kl.data.cpu().item() + lossD_fake_kl.data.cpu().item() * images.shape[0]
+                batch_kls_real += lossE_real_kl.data.cpu().item() * images.shape[0]
+                batch_kls_fake += lossD_fake_kl.cpu().item() * images.shape[0]
+                batch_kls_rec += lossD_rec_kl.data.cpu().item() * images.shape[0]
+                batch_rec_errs += loss_rec.data.cpu().item() * images.shape[0]
+
+                batch_exp_elbo_f += expelbo_fake.data.cpu() * images.shape[0]
+                batch_exp_elbo_r += expelbo_rec.data.cpu() * images.shape[0]
+
+                batch_emb += loss_emb.cpu().item() * images.shape[0]
                     
-                    # ====================================
-                    diff_kls += -lossE_real_kl.data.cpu().item() + lossD_fake_kl.data.cpu().item() * images.shape[0]
-                    batch_kls_real += lossE_real_kl.data.cpu().item() * images.shape[0]
-                    batch_kls_fake += lossD_fake_kl.cpu().item() * images.shape[0]
-                    batch_kls_rec += lossD_rec_kl.data.cpu().item() * images.shape[0]
-                    batch_rec_errs += loss_rec.data.cpu().item() * images.shape[0]
-
-                    batch_exp_elbo_f += expelbo_fake.data.cpu() * images.shape[0]
-                    batch_exp_elbo_r += expelbo_rec.data.cpu() * images.shape[0]
-
-                    batch_emb += loss_emb.cpu().item() * images.shape[0]
-                    
-                else:
-                    z, real_mu, real_logvar, anomaly_embeddings = self.model.encode(real_batch, ga)
-                    rec = self.model.decoder(z)
-                    diff_kls = -1
-                    batch_kls_real = -1
-                    batch_kls_fake = -1
-                    batch_kls_rec = -1
-                    batch_rec_errs = -1
-                    batch_exp_elbo_f= -1
-                    batch_exp_elbo_r= -1
-                    batch_emb= -1
-
+                
+                """ TODO
                 # ------ Update Refine Model ------
 
                 if self.pre is None or self.pre == 'base': 
@@ -331,13 +294,14 @@ class Trainer:
                     batch_netGD_rec += sum(losses.values()).cpu().item() * images.shape[0]
                     batch_netG_loss += losses['advg'].cpu().item() * images.shape[0]
                     batch_netD_loss += dis_loss.cpu().item() * images.shape[0]
+                """
 
-            # Testing
+            # Testing TODO
             test_dic = self.test(b_loss)
             val_loss = test_dic["losses"] 
             metrics = test_dic["metrics"] 
             images = test_dic["images"] 
-
+            
             epoch_loss_d_kls = diff_kls / count_images if count_images > 0 else diff_kls
             epoch_loss_kls_real = batch_kls_real / count_images if count_images > 0 else batch_kls_real
             epoch_loss_kls_fake = batch_kls_fake / count_images if count_images > 0 else batch_kls_fake

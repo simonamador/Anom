@@ -429,36 +429,21 @@ def load_model_new(model_path, base, ga_method, w, h, z_dim, model='default', pr
         else:
             raise NameError('Pre-trained model did not load properly')
         
-def load_model_new_new(model_path, base, ga_method, w, h, z_dim, model='default', pre = False, ga_n = 100, BOE_form = 'BOE'):
+def load_model_VAEAOTGAN(model_path, ga_method, w, h, z_dim, model='default', ga_n = 100, BOE_form = 'BOE'):
     prCyan(f'{ga_method=}')
-    
     from models.VAE_GAN import Encoder, Decoder
     encoder = Encoder(h, w, z_dim, method = ga_method, model = model, ga_n = ga_n, BOE_form = BOE_form)
-    
     decoder = Decoder(h, w, int(z_dim/2) + (ga_n if ga_method in ['ordinal_encoding', 'one_hot_encoding', 'bpoe'] else 0))
-
     cpe = torch.load(model_path+'encoder_best.pth', map_location=torch.device('cpu'))
     cpd = torch.load(model_path+'decoder_best.pth', map_location=torch.device('cpu'))
     # cpe = torch.load(model_path+'encoder_latest.pth', map_location=torch.device('cpu'))
     # cpd = torch.load(model_path+'decoder_latest.pth', map_location=torch.device('cpu'))
-
-    cpe_new = OrderedDict()
-    cpd_new = OrderedDict()
-
     try:
-        for k, v in cpe['encoder'].items():
-            name = k[:]
-            cpe_new[name] = v
-
-        for k, v in cpd['decoder'].items():
-            name = k[:]
-            cpd_new[name] = v
-
-        encoder.load_state_dict(cpe_new)
-        decoder.load_state_dict(cpd_new)
+        encoder.load_state_dict(cpe['encoder'])
+        decoder.load_state_dict(cpd['decoder'])
         return encoder, decoder
-    except:
-        raise NameError('Pre-trained model did not load properly')
+    except Exception as e:
+        raise NameError(f'Pre-trained model did not load properly: {e}')
 
 def load_model_cycle(model_path, base, ga_method, w, h, z_dim, model='default', pre = False, ga_n = 100, BOE_form = 'BOE'):
     prCyan(f'{ga_method=}')

@@ -150,7 +150,6 @@ class Decoder(BaseNetwork):
         self.aot = nn.Sequential(*[AOTBlock(256+self.BOE_size, rates) for _ in range(block_num)])
 
         self.decoder = nn.Sequential(
-            # nn.Linear(z_dim, self.z_develop)
             UpConv(256+self.BOE_size, 128),
             nn.ReLU(True),
             UpConv(128, 64),
@@ -166,7 +165,9 @@ class Decoder(BaseNetwork):
         x = self.aot(x)
         x = self.decoder(x)
         x = torch.tanh(x)
-        return x
+        y_ref = torch.clamp(x, 0, 1)
+        zero_pad = torch.nn.ZeroPad2d(1)
+        return zero_pad(y_ref)
 
 
 class UpConv(nn.Module):
@@ -216,8 +217,8 @@ def my_layer_norm(feat):
     feat = 5 * feat
     return feat
 
+# TODO
 
-""" TODO
 # ----- discriminator -----
 class Discriminator(BaseNetwork):
     def __init__(self,  BOE_size=0, BOE_form = 'BOE'):
@@ -264,7 +265,7 @@ class Discriminator(BaseNetwork):
         return img_features
     
 
-
+""" 
 # Decoder class builds decoder model depending on the model type.
 # Inputs: H, y (x and y size of the MRI slice),z_dim (length of the input z-vector), model (the model type) 
 # Note: z_dim in Encoder is not the same as z_dim in Decoder, as the z_vector has half the size of the z_parameters.
