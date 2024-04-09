@@ -1,8 +1,8 @@
-from models.aotgan.common import BaseNetwork
+from aotgan.common import BaseNetwork
 from torch.nn.utils import spectral_norm
 import torch.distributions as dist
 import torch.nn.functional as F
-from models.vae import Basic
+from vae import Basic
 import torch.nn as nn
 import torch
 
@@ -102,10 +102,15 @@ class Encoder(nn.Module):
 
         self.BOE_form = BOE_forms[BOE_form]
 
-    def forward(self,x,ga):
+    def forward(self,x,ga=None):
+
+        if ga is None:
+            batch_size = x.size(0)
+            ga = torch.full((batch_size, 1), 30.0, dtype=torch.float32, device=x.device)
+        
         
         if self.size and self.method == 'bpoe':
-            ga = create_bi_partitioned_ordinal_vector(ga)
+            ga = create_bi_partitioned_ordinal_vector(ga, self.size)
         
         embeddings = []
 
@@ -137,8 +142,6 @@ class Encoder(nn.Module):
         
         return z_sample, mu, log_std, {'embeddings': embeddings}
 
-# Code from https://github.com/researchmm/AOT-GAN-for-Inpainting.git
-
 class Decoder(BaseNetwork):
     def __init__(self, rates='1+2+4+8', block_num=8, BOE_size=0, BOE_form = 'BOE'):
         nr_channels = 1
@@ -150,7 +153,7 @@ class Decoder(BaseNetwork):
         self.aot = nn.Sequential(*[AOTBlock(256+self.BOE_size, rates) for _ in range(block_num)])
 
         self.decoder = nn.Sequential(
-            UpConv(256+self.BOE_size, 128),
+            UpConv(256, 128),
             nn.ReLU(True),
             UpConv(128, 64),
             nn.ReLU(True),
@@ -303,3 +306,10 @@ class Decoder(nn.Module):
         return recon
     
 """
+
+if __name__ == '__main__':
+    from torchsummary import summary
+    emodel = Encoder(158, 158, 512, 'bpoe', model='default', ga_n=100, BOE_form = 'BOE')
+    dmodel = Decoder(BOE_size=100, BOE_form = 'BOE')
+    summary(emodel, (1, 158, 158), device='cpu')
+    summary(dmodel, (1, 356), device='cpu')

@@ -208,3 +208,4 @@ class Discriminator(BaseNetwork):
         # Process through convolutional layers
         img_features = self.conv(x)
         return img_features
+ 

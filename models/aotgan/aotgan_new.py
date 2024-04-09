@@ -100,8 +100,13 @@ class InpaintGenerator(BaseNetwork):
         self.BOE_form = BOE_form
 
     def forward(self, x, ga=None):
+        if ga is None:
+            batch_size = x.size(0)
+            ga = torch.full((batch_size, 1), 30.0, dtype=torch.float32, device=x.device)
 
         x = self.encoder(x)
+
+        
 
         if ga is not None:
             # Encode GA using your method
@@ -208,3 +213,11 @@ class Discriminator(BaseNetwork):
         # Process through convolutional layers
         img_features = self.conv(x)
         return img_features
+    
+       
+if __name__ == '__main__':
+    from torchsummary import summary
+    emodel = Encoder(158, 158, 512, 'bpoe', model='default', ga_n=100, BOE_form = 'BOE')
+    dmodel = Decoder(BOE_size=100, BOE_form = 'BOE')
+    summary(emodel, (1, 158, 158), device='cpu')
+    summary(dmodel, (1, 356), device='cpu')

@@ -20,7 +20,7 @@ class Framework(nn.Module):
 
         if ga:
             # from models.ga_vae import Encoder, Decoder
-            from models.SI_VAE import Encoder, Decoder, Discriminator
+            from models.VAE_GAN import Encoder, Decoder, Discriminator
             self.encoder = Encoder(n, n, z_dim, method, model=model, ga_n=ga_n, BOE_form = BOE_form)
             self.decoder = Decoder(BOE_size=ga_n, BOE_form = BOE_form)
             self.refineD = Discriminator(BOE_size=ga_n, BOE_form = BOE_form)
